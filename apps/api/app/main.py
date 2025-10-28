@@ -22,4 +22,8 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "finanspanel-api", "version": "0.1
+    # ← Buradaki satır önce eksik tırnak yüzünden patlıyordu
+    return {"status": "ok", "service": "finanspanel-api", "version": "0.1.0"}
+
+# Router en sonda; ağır importlar varsa bile app ayağa kalkar
+app.include_router(uploads.router, prefix="/uploads", tags=["uploads"])
