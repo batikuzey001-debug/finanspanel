@@ -5,6 +5,35 @@ import { uploadFile, computeFile } from "../lib/api";
 const tl = new Intl.NumberFormat("tr-TR", { style: "currency", currency: "TRY", maximumFractionDigits: 2 });
 const fmt = (n?: number | null) => (typeof n === "number" ? tl.format(n) : "-");
 
+/** UI styles — koyu tema */
+const card: React.CSSProperties = {
+  border: "1px solid #1f2937",
+  borderRadius: 16,
+  padding: 14,
+  marginBottom: 14,
+  background: "#151a23",
+  boxShadow: "0 1px 8px rgba(0,0,0,0.25)",
+};
+const box: React.CSSProperties = {
+  padding: 12,
+  border: "1px solid #1f2937",
+  borderRadius: 12,
+  background: "#0f1520",
+};
+const cap: React.CSSProperties = { fontSize: 12, color: "#94a3b8", marginBottom: 4 };
+const btnPrimary: React.CSSProperties = {
+  marginTop: 16,
+  padding: "11px 16px",
+  borderRadius: 12,
+  border: "1px solid #1f2937",
+  cursor: "pointer",
+  background: "linear-gradient(135deg, #0ea5e9, #6366f1)",
+  color: "#fff",
+  fontWeight: 700,
+  letterSpacing: 0.3,
+};
+const tiny: React.CSSProperties = { fontSize: 12, color: "#94a3b8" };
+
 type Summary = {
   filename: string;
   sheet_names: string[];
@@ -85,101 +114,91 @@ export default function Upload() {
 
   return (
     <div>
-      <Dropzone onFile={onFile} />
-      {loading && <p style={{ marginTop: 16 }}>İşleniyor…</p>}
-      {err && <p style={{ marginTop: 16, color: "#b00" }}>{err}</p>}
+      {/* Üst blok — dosya yükleme + özet */}
+      <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 16 }}>
+        <div style={card}>
+          <Dropzone onFile={onFile} />
+          <button onClick={onCompute} style={btnPrimary} disabled={!file || loading}>
+            {loading ? "İşleniyor…" : "Hesapla"}
+          </button>
+          {err && <p style={{ marginTop: 10, color: "#ef4444" }}>{err}</p>}
+        </div>
 
-      {summary && (
-        <div style={{ marginTop: 20 }}>
-          <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Özet</h3>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12 }}>
-            <div style={box}><div style={cap}>Dosya</div><div>{summary.filename}</div></div>
-            <div style={box}><div style={cap}>Sheet</div><div>{summary.first_sheet} ({summary.sheet_names.length})</div></div>
-            <div style={box}><div style={cap}>Kolon</div><div>{summary.columns.length}</div></div>
-            <div style={box}><div style={cap}>Satır</div><div>{summary.row_count_exact ?? summary.row_count_sampled}</div></div>
+        {summary && (
+          <div style={card}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 12 }}>
+              <div style={box}><div style={cap}>Dosya</div><div>{summary.filename}</div></div>
+              <div style={box}><div style={cap}>Sheet</div><div>{summary.first_sheet} ({summary.sheet_names.length})</div></div>
+              <div style={box}><div style={cap}>Kolon</div><div>{summary.columns.length}</div></div>
+              <div style={box}><div style={cap}>Satır</div><div>{summary.row_count_exact ?? summary.row_count_sampled}</div></div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Sonuç kartları */}
+      {res && (
+        <div style={{ marginTop: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+            <div style={{ fontWeight: 800, fontSize: 16 }}>Sonuçlar</div>
+            <div style={tiny}>{res.filename} • {res.total_rows} satır</div>
           </div>
 
-          <button onClick={onCompute} style={btn}>Hesapla</button>
+          {res.reports.slice(0, 30).map((r) => (
+            <div key={r.member_id} style={card}>
+              {/* Başlık */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <div style={{ fontWeight: 800, fontSize: 16 }}>Üye: {r.member_id}</div>
+                <div style={tiny}>{r.last_operation_type}{r.last_operation_ts ? ` • ${r.last_operation_ts}` : ""}</div>
+              </div>
 
-          {res && (
-            <div style={{ marginTop: 24 }}>
-              <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Sonuç (ilk 20)</h3>
-              {res.reports.slice(0, 20).map((r) => (
-                <div key={r.member_id} style={card}>
-                  {/* Üst başlık */}
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                    <div style={{ fontWeight: 800, fontSize: 16 }}>Üye: {r.member_id}</div>
-                    <div style={{ fontSize: 12, opacity: 0.7 }}>{r.last_operation_type}{r.last_operation_ts ? ` • ${r.last_operation_ts}` : ""}</div>
-                  </div>
+              {/* Satır 1: Yatırım/Bonus/Para Birimi */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12 }}>
+                <div style={box}><div style={cap}>Yatırım Tutarı</div><div>{fmt(r.last_deposit_amount)}</div></div>
+                <div style={box}><div style={cap}>Yöntem</div><div style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.last_payment_method || "-"}</div></div>
+                <div style={box}><div style={cap}>Bonus</div><div>{r.last_bonus_name ? `${r.last_bonus_name} (${fmt(r.last_bonus_amount||0)})` : "-"}</div></div>
+                <div style={box}><div style={cap}>Birim</div><div>{r.currency || "TRY"}</div></div>
+              </div>
 
-                  {/* 1. satır: Yatırım/Bonus */}
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12 }}>
-                    <div style={box}>
-                      <div style={cap}>Yatırım Tutarı</div>
-                      <div>{fmt(r.last_deposit_amount)}</div>
-                    </div>
-                    <div style={box}>
-                      <div style={cap}>Yatırım Yöntemi</div>
-                      <div style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                        {r.last_payment_method || "-"}
-                      </div>
-                    </div>
-                    <div style={box}>
-                      <div style={cap}>Bonus</div>
-                      <div>{r.last_bonus_name ? `${r.last_bonus_name} (${fmt(r.last_bonus_amount||0)})` : "-"}</div>
-                    </div>
-                    <div style={box}>
-                      <div style={cap}>Para Birimi</div>
-                      <div>{r.currency || "TRY"}</div>
-                    </div>
-                  </div>
-
-                  {/* 2. satır: Çevrim/Gereksinim/Kalan/Kâr */}
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginTop: 8 }}>
-                    <div style={box}><div style={cap}>Toplam Çevrim</div><div>{fmt(r.total_wager)}</div></div>
-                    <div style={box}><div style={cap}>Gereksinim (1x)</div><div>{fmt(r.requirement)}</div></div>
-                    <div style={box}><div style={cap}>Kalan Çevrim</div><div>{fmt(r.remaining)}</div></div>
-                    <div style={box}>
-                      <div style={cap}>Toplam Kâr</div>
-                      <div style={{ color: r.total_profit >= 0 ? "#0a7d2b" : "#b00020", fontWeight: 700 }}>
-                        {fmt(r.total_profit)}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 3. satır: Unsettled */}
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginTop: 8 }}>
-                    <div style={box}><div style={cap}>Unsettled (Cycle)</div><div>{r.unsettled_count} adet, {fmt(r.unsettled_amount)}</div></div>
-                    <div style={box}><div style={cap}>Unsettled (Global)</div><div>{r.global_unsettled_count} adet, {fmt(r.global_unsettled_amount)}</div></div>
-                    <div style={box}><div style={cap}>Bonus Çevrim</div><div>{r.bonus_wager != null ? fmt(r.bonus_wager) : "-"}</div></div>
-                  </div>
-
-                  {/* 4. satır: Top 3 Oyun / Sağlayıcı */}
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 8 }}>
-                    <div style={box}>
-                      <div style={cap}>En Kârlı 3 Oyun</div>
-                      <ul style={{ margin: 6 }}>
-                        {r.top_games.length ? r.top_games.map((g) => <li key={g.name}>{g.name}: {fmt(g.value)}</li>) : <li>-</li>}
-                      </ul>
-                    </div>
-                    <div style={box}>
-                      <div style={cap}>En Kârlı 3 Sağlayıcı</div>
-                      <ul style={{ margin: 6 }}>
-                        {r.top_providers.length ? r.top_providers.map((p) => <li key={p.name}>{p.name}: {fmt(p.value)}</li>) : <li>-</li>}
-                      </ul>
-                    </div>
+              {/* Satır 2: Çevrim/Gereksinim/Kalan/Kâr */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginTop: 8 }}>
+                <div style={box}><div style={cap}>Toplam Çevrim</div><div>{fmt(r.total_wager)}</div></div>
+                <div style={box}><div style={cap}>Gereksinim (1x)</div><div>{fmt(r.requirement)}</div></div>
+                <div style={box}><div style={cap}>Kalan</div><div>{fmt(r.remaining)}</div></div>
+                <div style={box}>
+                  <div style={cap}>Toplam Kâr</div>
+                  <div style={{ color: r.total_profit >= 0 ? "#34d399" : "#f87171", fontWeight: 800 }}>
+                    {fmt(r.total_profit)}
                   </div>
                 </div>
-              ))}
+              </div>
+
+              {/* Satır 3: Unsettled & Bonus Çevrim */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginTop: 8 }}>
+                <div style={box}><div style={cap}>Unsettled (Cycle)</div><div>{r.unsettled_count} adet • {fmt(r.unsettled_amount)}</div></div>
+                <div style={box}><div style={cap}>Unsettled (Global)</div><div>{r.global_unsettled_count} adet • {fmt(r.global_unsettled_amount)}</div></div>
+                <div style={box}><div style={cap}>Bonus Çevrim</div><div>{r.bonus_wager != null ? fmt(r.bonus_wager) : "-"}</div></div>
+              </div>
+
+              {/* Satır 4: Top 3 Oyun / Sağlayıcı */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 8 }}>
+                <div style={box}>
+                  <div style={cap}>En Kârlı 3 Oyun</div>
+                  <ul style={{ margin: "6px 0 0 16px" }}>
+                    {r.top_games.length ? r.top_games.map((g) => <li key={g.name}>{g.name}: {fmt(g.value)}</li>) : <li>-</li>}
+                  </ul>
+                </div>
+                <div style={box}>
+                  <div style={cap}>En Kârlı 3 Sağlayıcı</div>
+                  <ul style={{ margin: "6px 0 0 16px" }}>
+                    {r.top_providers.length ? r.top_providers.map((p) => <li key={p.name}>{p.name}: {fmt(p.value)}</li>) : <li>-</li>}
+                  </ul>
+                </div>
+              </div>
             </div>
-          )}
+          ))}
         </div>
       )}
     </div>
   );
 }
-
-const box: React.CSSProperties = { padding: 12, border: "1px solid #eee", borderRadius: 12, background: "#fff" };
-const cap: React.CSSProperties = { fontSize: 12, opacity: 0.7, marginBottom: 4 };
-const btn: React.CSSProperties = { marginTop: 16, padding: "10px 16px", borderRadius: 12, border: "1px solid #ddd", cursor: "pointer", background: "#111", color: "#fff" };
-const card: React.CSSProperties = { border: "1px solid #e9e9e9", borderRadius: 16, padding: 14, marginBottom: 14, background: "#fafafa", boxShadow: "0 1px 6px rgba(0,0,0,0.05)" };
