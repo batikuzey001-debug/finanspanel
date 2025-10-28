@@ -6,7 +6,7 @@ export default function App() {
       {/* Header */}
       <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
         <img
-          src="https://i.ibb.co/HDjtvx3n/Gambler-ON-Logo-transparent-trim.png"
+          src="https://i.ibb.co/qqRjgMB/app-logo-2.png"
           alt="GamblerON"
           style={{ height: 42, objectFit: "contain", filter: "drop-shadow(0 2px 12px rgba(0,0,0,.6))" }}
         />
