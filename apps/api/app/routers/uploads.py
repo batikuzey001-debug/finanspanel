@@ -1,6 +1,5 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from pydantic import BaseModel
-import pandas as pd
 from io import BytesIO
 
 router = APIRouter()
@@ -21,7 +20,9 @@ async def upload_file(file: UploadFile = File(...)):
     content = await file.read()
 
     try:
-        # Excel türleri
+        # Pandas/openpyxl'i fonksiyon içinde import ederek start-up'ta ağır yükten kaçınıyoruz
+        import pandas as pd  # type: ignore
+
         if name.endswith((".xlsx", ".xls", ".xlsm")):
             xls = pd.ExcelFile(BytesIO(content), engine="openpyxl")
             sheet_names = xls.sheet_names
@@ -30,7 +31,6 @@ async def upload_file(file: UploadFile = File(...)):
                 raise ValueError("Çalışma sayfası bulunamadı")
             df = pd.read_excel(xls, sheet_name=first_sheet, nrows=5000)
         else:
-            # CSV
             df = pd.read_csv(BytesIO(content))
             sheet_names = ["csv"]
             first_sheet = "csv"
