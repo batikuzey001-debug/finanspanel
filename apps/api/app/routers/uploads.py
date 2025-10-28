@@ -1,12 +1,11 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form
 from pydantic import BaseModel
 from io import BytesIO
-from typing import Optional, List, Dict, Any
-import re
+from typing import Optional, List, Dict, Any, Tuple
 
 router = APIRouter()
 
-# ---------- MODELLER ----------
+# -------------------- MODELLER --------------------
 
 class UploadSummary(BaseModel):
     filename: str
@@ -14,43 +13,52 @@ class UploadSummary(BaseModel):
     first_sheet: Optional[str]
     columns: List[str]
     row_count_sampled: int
-    row_count_exact: Optional[int] = None  # v0.2: tam satır
+    row_count_exact: Optional[int] = None
 
-class ComputeParams(BaseModel):
-    # tarih filtresi opsiyonel; varsa bu aralıkta hesaplarız
-    date_from: Optional[str] = None  # ISO veya 'dd.MM.yyyy'
-    date_to: Optional[str] = None
-    # product ağırlıkları ileride eklenecek; şimdilik tüm "placed" satırlarını %100 sayıyoruz
+class TopItem(BaseModel):
+    name: str
+    value: float
 
-class MemberSummary(BaseModel):
+class MemberCycleReport(BaseModel):
     member_id: str
-    total_rows: int
-    total_wager: float              # Toplam çevrim (placed toplamı; mutlak değer)
-    unsettled_count: int            # placed olup settled olmayan referans sayısı
+    last_operation_type: str                       # "DEPOSIT" | "BONUS" | "OTHER" | "NONE"
+    last_operation_ts: Optional[str]
+    last_deposit_amount: Optional[float] = None
+    last_bonus_name: Optional[str] = None
+    last_bonus_amount: Optional[float] = None
+
+    total_wager: float                             # cycle içindeki |BET_PLACED| toplamı
+    total_profit: float                            # sum(SETTLED) + sum(PLACED)  (cycle)
+    requirement: float                             # yatırımsa 1x deposit, değilse 0
+    remaining: float                               # max(requirement - total_wager, 0)
+
+    bonus_wager: Optional[float] = None            # son bonusla yapılan toplam çevrim (bonus başlangıçlıysa)
+    bonus_profit: Optional[float] = None           # bonus satırları içindeki kâr
+
+    unsettled_count: int                           # placed var settled yok referans adet
+    unsettled_amount: float                        # bu placed tutarlarının toplamı
     unsettled_reference_ids: List[str]
-    last_operation: Optional[Dict[str, Any]]  # {"type": "DEPOSIT|BONUS|OTHER", "amount": float, "ts": "..."}
-    top_game: Optional[Dict[str, Any]]        # {"game_name": str, "wager": float}
+
+    top_games: List[TopItem]                       # en kârlı 3 oyun (profit>0)
+    top_providers: List[TopItem]                   # en kârlı 3 sağlayıcı (profit>0)
     currency: Optional[str] = None
 
 class ComputeResult(BaseModel):
     filename: str
     total_rows: int
-    members: List[MemberSummary]
+    reports: List[MemberCycleReport]
 
+# -------------------- YARDIMCI --------------------
 
-# ---------- YARDIMCI ----------
-
-def _read_dataframe(file: UploadFile):
-    """Excel/CSV okur, ilk sheet'i döner, Pandas'ı lazy import eder."""
+def _read_dataframe_sync(file: UploadFile):
+    """Excel/CSV okur, ilk sheet'i döner (sync)."""
     try:
         import pandas as pd  # type: ignore
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Pandas yüklenemedi: {e}")
 
     name = (file.filename or "").lower()
-    content = file.file.read() if hasattr(file, "file") else None
-    if content is None:
-        content = getattr(file, "spooled", None) or (await file.read())  # type: ignore
+    content = file.file.read()
     try:
         if name.endswith((".xlsx", ".xls", ".xlsm")):
             xls = pd.ExcelFile(BytesIO(content), engine="openpyxl")
@@ -68,188 +76,247 @@ def _read_dataframe(file: UploadFile):
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Dosya okunamadı: {e}")
 
-    # Kolon adlarını normalize
     df.columns = [str(c).strip() for c in df.columns]
     return df, sheet_names, (sheet_names[0] if sheet_names else None)
 
-
 def _col(df, *cands: str) -> Optional[str]:
-    """Verilen aday kolonlardan ilk bulunanı döner (case-insens)."""
     cols_lower = {c.lower(): c for c in df.columns}
-    for c in cands:
-        key = c.lower()
-        if key in cols_lower:
-            return cols_lower[key]
-    # gevşek eşleşme
+    for cand in cands:
+        c = cand.lower()
+        if c in cols_lower:
+            return cols_lower[c]
+    # boşlukları silerek gevşek eşleşme
     for c in df.columns:
         for cand in cands:
             if c.lower().replace(" ", "") == cand.lower().replace(" ", ""):
                 return c
     return None
 
-
-def _to_datetime(series):
+def _to_dt(series):
     import pandas as pd  # type: ignore
-    return pd.to_datetime(series, errors="coerce", dayfirst=True)  #  dd.MM.yyyy de destekler
+    return pd.to_datetime(series, errors="coerce", dayfirst=True)
 
+def _norm_reason(v: Any) -> str:
+    if not isinstance(v, str):
+        return ""
+    s = v.strip().lower()
+    # net etiketleri önce
+    if s in {"bet_placed", "bet placed"}: return "BET_PLACED"
+    if s in {"bet_settled", "bet settled"}: return "BET_SETTLED"
+    if s in {"deposit", "yatırım", "yatirim"}: return "DEPOSIT"
+    if "bonus" in s or "promo" in s: return "BONUS"
+    if "placed" in s or "stake" in s or "wager" in s: return "BET_PLACED"
+    if "settled" in s or "payout" in s or "result" in s: return "BET_SETTLED"
+    if "withdraw" in s: return "WITHDRAWAL"
+    return s.upper()
 
-def _is_reason(val: str, needle: str) -> bool:
-    """Reason alanında 'bet placed', 'bet settled', 'deposit', 'bonus' gibi sinyalleri esnek yakala."""
-    if not isinstance(val, str):
-        return False
-    v = val.strip().lower()
-    n = needle.lower()
-    if n == "placed":
-        return ("placed" in v) or ("bet place" in v) or ("stake" in v)
-    if n == "settled":
-        return ("settled" in v) or ("result" in v) or ("payout" in v)
-    if n == "deposit":
-        return ("deposit" in v) or ("yatırım" in v) or ("yatir" in v)
-    if n == "bonus":
-        return ("bonus" in v) or ("prom" in v)
-    return n in v
+def _cycle_bounds(df, col_ts: str, from_idx: int) -> Tuple[int, int]:
+    """
+    from_idx dahil; bir sonraki DEPOSIT/BONUS gelene kadar devam.
+    Dönen: (start_idx, end_exclusive_idx)
+    """
+    types = df["__reason_type"].values
+    start = from_idx
+    end = len(df)
+    for i in range(from_idx + 1, len(df)):
+        if types[i] in ("DEPOSIT", "BONUS"):
+            end = i
+            break
+    return start, end
 
-
-# ---------- ENDPOINTLER ----------
+# -------------------- ENDPOINTLER --------------------
 
 @router.post("", response_model=UploadSummary)
 async def upload_file(file: UploadFile = File(...)):
-    # Sadece özet (v0.1 + satır tam sayısı)
-    df, sheet_names, first_sheet = _read_dataframe(file)
-    cols = [str(c) for c in df.columns]
+    df, sheet_names, first_sheet = _read_dataframe_sync(file)
     return UploadSummary(
         filename=file.filename,
         sheet_names=sheet_names,
         first_sheet=first_sheet,
-        columns=cols,
+        columns=[str(c) for c in df.columns],
         row_count_sampled=min(len(df), 5000),
         row_count_exact=int(len(df)),
     )
 
-
 @router.post("/compute", response_model=ComputeResult)
-async def compute(file: UploadFile = File(...), params: ComputeParams = File(None)):
+async def compute(
+    file: UploadFile = File(...),
+    date_from: Optional[str] = Form(None),
+    date_to: Optional[str] = Form(None),
+):
     """
-    v0.2: Çevrim ön-izleme.
-    - Toplam satır (tam)
-    - Member bazlı: toplam çevrim (placed toplamı), unsettled referanslar (placed olup settled olmayan),
-      son işlem (deposit/bonus/other), en çok çevrim yapılan oyun.
+    Son yatırım/bonus bazlı 'cycle' tespiti ve rapor:
+      - Yatırımsa requirement=deposit_amount (1x), remaining hesaplanır.
+      - Bonus varsa bonus bilgisi + bonusla yapılan toplam çevrim (bonus_wager) ve bonus_profit.
+      - Placed/Settled eşleşmesi ile unsettled listesi.
+      - Oyun/sağlayıcı bazında kâr, ilk 3 pozitif kârlı item.
     """
     import pandas as pd  # type: ignore
     import numpy as np   # type: ignore
 
-    df, _, _ = _read_dataframe(file)
+    df, _, _ = _read_dataframe_sync(file)
     total_rows = int(len(df))
 
-    # Kolon eşleştirme (dosyana göre otomatik):
+    # Gerekli kolonlar
     col_ts = _col(df, "Date & Time", "Date", "timestamp", "time")
     col_member = _col(df, "Player ID", "member_id", "User ID", "Account ID")
     col_reason = _col(df, "Reason", "Description", "Event")
-    col_bet_type = _col(df, "Bet Type", "Product")
-    col_game = _col(df, "Game Name", "Game")
     col_ref = _col(df, "Reference ID", "Ref ID", "Bet ID", "Ticket")
+    col_game = _col(df, "Game Name", "Game")
+    col_provider = _col(df, "Game Provider", "Provider")
+    # Tutar için öncelik: Amount > Base Amount
     col_amount = _col(df, "Amount", "Base Amount", "Bet Amount", "Stake")
+    col_details = _col(df, "Details", "Note")
 
-    if not all([col_ts, col_member, col_reason, col_amount]):
-        missing = [("Date & Time", col_ts), ("Player ID", col_member), ("Reason", col_reason), ("Amount", col_amount)]
-        missing = [name for name, val in missing if not val]
+    missing = [("Date & Time", col_ts), ("Player ID", col_member), ("Reason", col_reason), ("Amount", col_amount)]
+    missing = [name for name, v in missing if not v]
+    if missing:
         raise HTTPException(status_code=422, detail=f"Eksik kolon(lar): {', '.join(missing)}")
 
-    # Tip dönüşümleri
-    df[col_ts] = _to_datetime(df[col_ts])
+    # Temizlik ve tip dönüşümü
+    df[col_ts] = _to_dt(df[col_ts])
     df[col_amount] = pd.to_numeric(df[col_amount], errors="coerce").fillna(0.0)
-
-    # Tarih filtresi opsiyonel
-    if params and (params.date_from or params.date_to):
-        dfrom = pd.to_datetime(params.date_from, errors="coerce", dayfirst=True) if params.date_from else None
-        dto = pd.to_datetime(params.date_to, errors="coerce", dayfirst=True) if params.date_to else None
-        if dfrom is not None:
-            df = df[df[col_ts] >= dfrom]
-        if dto is not None:
-            df = df[df[col_ts] <= dto]
-
-    # Esnek sinyaller
-    def is_placed(s: pd.Series) -> pd.Series:
-        return s.astype(str).str.lower().apply(lambda x: _is_reason(x, "placed"))
-
-    def is_settled(s: pd.Series) -> pd.Series:
-        return s.astype(str).str.lower().apply(lambda x: _is_reason(x, "settled"))
-
-    def is_deposit(s: pd.Series) -> pd.Series:
-        return s.astype(str).str.lower().apply(lambda x: _is_reason(x, "deposit"))
-
-    def is_bonus(s: pd.Series) -> pd.Series:
-        return s.astype(str).str.lower().apply(lambda x: _is_reason(x, "bonus"))
-
-    # ÇEVRİM: tüm "placed" satırlarının mutlak tutar toplamı (ürün ağırlıkları v0.3'te)
-    placed_mask = is_placed(df[col_reason])
-    df["__wager"] = np.abs(df.loc[placed_mask, col_amount]).fillna(0.0)
-    df["__wager"] = df["__wager"].fillna(0.0)
-
-    # UNSETTLED: Reference ID bazlı kontrol (placed = var & settled = yok)
-    unsettled_rids: List[str] = []
     if col_ref:
-        placed_rids = set(df.loc[placed_mask & df[col_ref].notna(), col_ref].astype(str))
-        settled_rids = set(df.loc[is_settled(df[col_reason]) & df[col_ref].notna(), col_ref].astype(str))
-        unsettled_rids = sorted(list(placed_rids - settled_rids))
-
-    # SON İŞLEM (yatırım/bonus/other): en yakın (son) satır
-    df["__is_deposit"] = is_deposit(df[col_reason])
-    df["__is_bonus"]   = is_bonus(df[col_reason])
-
-    # En çok çevrim yapılan oyun (game name'e göre)
+        df[col_ref] = df[col_ref].astype(str)
     if col_game:
-        game_wagers = df.groupby(col_game)["__wager"].sum().sort_values(ascending=False)
-        global_top_game = game_wagers.index[0] if not game_wagers.empty else None
-    else:
-        global_top_game = None
+        df[col_game] = df[col_game].astype(str)
+    if col_provider:
+        df[col_provider] = df[col_provider].astype(str)
+    if col_details:
+        df[col_details] = df[col_details].astype(str)
 
-    # Member bazlı derleme
-    results: List[MemberSummary] = []
-    for member_id, g in df.groupby(col_member):
-        total_rows_member = int(len(g))
-        total_wager_member = float(g["__wager"].sum())
+    # Tarih filtresi (opsiyonel)
+    if date_from:
+        df = df[df[col_ts] >= pd.to_datetime(date_from, errors="coerce", dayfirst=True)]
+    if date_to:
+        df = df[df[col_ts] <= pd.to_datetime(date_to, errors="coerce", dayfirst=True)]
 
-        # member bazlı unsettled
-        member_unsettled: List[str] = []
+    # Reason normalizasyonu
+    df["__reason_type"] = df[col_reason].apply(_norm_reason)
+
+    # Sırala (güvenlik)
+    df = df.sort_values(col_ts).reset_index(drop=True)
+
+    reports: List[MemberCycleReport] = []
+
+    for member_id, g in df.groupby(col_member, sort=False):
+        g = g.sort_values(col_ts).reset_index(drop=True)
+        # Son DEPOSIT ve SON BONUS index'leri
+        deposit_idx = g.index[g["__reason_type"] == "DEPOSIT"].tolist()
+        bonus_idx = g.index[g["__reason_type"] == "BONUS"].tolist()
+
+        last_dep_i = deposit_idx[-1] if deposit_idx else None
+        last_bonus_i = bonus_idx[-1] if bonus_idx else None
+
+        # Son işlem hangisi?
+        last_op_i = None
+        last_op_type = "NONE"
+        if last_dep_i is not None and (last_bonus_i is None or last_dep_i >= last_bonus_i):
+            last_op_i = last_dep_i
+            last_op_type = "DEPOSIT"
+        elif last_bonus_i is not None:
+            last_op_i = last_bonus_i
+            last_op_type = "BONUS"
+
+        if last_op_i is None:
+            # Hiç yatırım/bonus yok → tüm veri tek açık cycle; requirement 0
+            cycle_start, cycle_end = 0, len(g)
+            last_ts = None
+            deposit_amt = None
+            bonus_name = None
+            bonus_amt = None
+        else:
+            cycle_start, cycle_end = _cycle_bounds(g, col_ts, last_op_i)
+            last_ts = str(g.loc[last_op_i, col_ts]) if pd.notna(g.loc[last_op_i, col_ts]) else None
+            # Son işlem bilgileri
+            deposit_amt = float(g.loc[last_op_i, col_amount]) if last_op_type == "DEPOSIT" else (
+                float(g.loc[last_dep_i, col_amount]) if last_dep_i is not None and last_dep_i == last_op_i else None
+            )
+            if last_op_type == "BONUS":
+                bonus_amt = float(g.loc[last_op_i, col_amount])
+                # bonus adı için Reason/Details birleşik isim
+                rtxt = str(g.loc[last_op_i, col_reason] or "")
+                dtxt = str(g.loc[last_op_i, col_details] or "") if col_details else ""
+                bonus_name = (dtxt or rtxt).strip() or "Bonus"
+            else:
+                bonus_amt = None
+                bonus_name = None
+
+        cycle = g.iloc[cycle_start:cycle_end].copy()
+
+        # Wager ve Profit
+        placed_mask = cycle["__reason_type"] == "BET_PLACED"
+        settled_mask = cycle["__reason_type"] == "BET_SETTLED"
+
+        # Çevrim (mutlak placed toplamı)
+        total_wager = float(np.abs(cycle.loc[placed_mask, col_amount]).sum())
+
+        # Profit: settled (genelde pozitif) + placed (genelde negatif)
+        total_profit = float(cycle.loc[settled_mask, col_amount].sum() + cycle.loc[placed_mask, col_amount].sum())
+
+        # Requirement/Remaining (yalnızca son işlem yatırımla başlıyorsa 1x)
+        requirement = float(deposit_amt) if (last_op_type == "DEPOSIT" and deposit_amt is not None) else 0.0
+        remaining = float(max(requirement - total_wager, 0.0))
+
+        # Unsettled (Reference ID bazında)
+        unsettled_ids: List[str] = []
+        unsettled_amount = 0.0
         if col_ref:
-            rids_p = set(g.loc[placed_mask.reindex(g.index, fill_value=False) & g[col_ref].notna(), col_ref].astype(str))
-            rids_s = set(g.loc[is_settled(g[col_reason]) & g[col_ref].notna(), col_ref].astype(str))
-            member_unsettled = sorted(list(rids_p - rids_s))
+            placed_rids = set(cycle.loc[placed_mask & cycle[col_ref].notna(), col_ref].astype(str))
+            settled_rids = set(cycle.loc[settled_mask & cycle[col_ref].notna(), col_ref].astype(str))
+            diff = sorted(list(placed_rids - settled_rids))
+            unsettled_ids = diff
+            if diff:
+                # Bu referansların placed tutar toplamı
+                unsettled_amount = float(
+                    np.abs(cycle.loc[placed_mask & cycle[col_ref].isin(diff), col_amount]).sum()
+                )
 
-        # Son işlem
-        g_sorted = g.sort_values(col_ts, ascending=False)
-        last_op = None
-        for _, row in g_sorted.iterrows():
-            if row["__is_deposit"]:
-                last_op = {"type": "DEPOSIT", "amount": float(row[col_amount]), "ts": str(row[col_ts])}
-                break
-            if row["__is_bonus"]:
-                last_op = {"type": "BONUS", "amount": float(row[col_amount]), "ts": str(row[col_ts])}
-                break
-        if last_op is None and not g_sorted.empty:
-            r0 = g_sorted.iloc[0]
-            last_op = {"type": "OTHER", "amount": float(r0[col_amount]), "ts": str(r0[col_ts])}
+        # Bonus çevrimi ve kâr (eğer bonusla başlamışsa)
+        bonus_wager = None
+        bonus_profit = None
+        if last_op_type == "BONUS":
+            bonus_wager = float(np.abs(cycle.loc[placed_mask, col_amount]).sum())
+            bonus_profit = float(cycle.loc[settled_mask, col_amount].sum() + cycle.loc[placed_mask, col_amount].sum())
 
-        # En çok çevrim yaptığı oyun (bu üyede)
-        top_game = None
+        # Oyun/sağlayıcı bazında kâr (ilk 3 pozitif)
+        top_games: List[TopItem] = []
+        top_providers: List[TopItem] = []
         if col_game:
-            mg = g.groupby(col_game)["__wager"].sum().sort_values(ascending=False)
-            if not mg.empty:
-                top_game = {"game_name": str(mg.index[0]), "wager": float(mg.iloc[0])}
+            gp = cycle.groupby(col_game)[col_amount].apply(lambda s: float(s[cycle.loc[s.index, "__reason_type"] == "BET_SETTLED"].sum() + s[cycle.loc[s.index, "__reason_type"] == "BET_PLACED"].sum()))
+            gp = gp[gp > 0].sort_values(ascending=False).head(3)
+            top_games = [TopItem(name=str(k), value=round(float(v), 2)) for k, v in gp.items()]
+        if col_provider:
+            pp = cycle.groupby(col_provider)[col_amount].apply(lambda s: float(s[cycle.loc[s.index, "__reason_type"] == "BET_SETTLED"].sum() + s[cycle.loc[s.index, "__reason_type"] == "BET_PLACED"].sum()))
+            pp = pp[pp > 0].sort_values(ascending=False).head(3)
+            top_providers = [TopItem(name=str(k), value=round(float(v), 2)) for k, v in pp.items()]
 
         # Para birimi (varsa)
-        col_curr = _col(g, "Currency", "Base Currency", "System Currency")
-        currency = str(g[col_curr].iloc[0]) if col_curr and not g[col_curr].empty else None
+        col_curr = _col(cycle, "Currency", "Base Currency", "System Currency")
+        currency = (str(cycle[col_curr].iloc[0]) if col_curr and not cycle[col_curr].empty else None)
 
-        results.append(MemberSummary(
+        reports.append(MemberCycleReport(
             member_id=str(member_id),
-            total_rows=total_rows_member,
-            total_wager=round(total_wager_member, 2),
-            unsettled_count=len(member_unsettled),
-            unsettled_reference_ids=member_unsettled[:50],  # çok uzamasın
-            last_operation=last_op,
-            top_game=top_game,
+            last_operation_type=last_op_type,
+            last_operation_ts=last_ts,
+            last_deposit_amount=(float(deposit_amt) if deposit_amt is not None else None),
+            last_bonus_name=(str(bonus_name) if bonus_name else None),
+            last_bonus_amount=(float(bonus_amt) if bonus_amt is not None else None),
+
+            total_wager=round(total_wager, 2),
+            total_profit=round(total_profit, 2),
+            requirement=round(requirement, 2),
+            remaining=round(remaining, 2),
+
+            bonus_wager=(round(float(bonus_wager), 2) if bonus_wager is not None else None),
+            bonus_profit=(round(float(bonus_profit), 2) if bonus_profit is not None else None),
+
+            unsettled_count=len(unsettled_ids),
+            unsettled_amount=round(float(unsettled_amount), 2),
+            unsettled_reference_ids=unsettled_ids[:50],
+
+            top_games=top_games,
+            top_providers=top_providers,
             currency=currency
         ))
 
@@ -257,5 +324,5 @@ async def compute(file: UploadFile = File(...), params: ComputeParams = File(Non
     return ComputeResult(
         filename=file.filename,
         total_rows=total_rows,
-        members=sorted(results, key=lambda x: (-x.total_wager, x.member_id)),
+        reports=sorted(reports, key=lambda r: (-r.total_wager, r.member_id))
     )
