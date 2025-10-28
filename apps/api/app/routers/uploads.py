@@ -28,7 +28,7 @@ class MemberCycleReport(BaseModel):
     last_deposit_amount: Optional[float] = None
     last_bonus_name: Optional[str] = None
     last_bonus_amount: Optional[float] = None
-    last_payment_method: Optional[str] = None      # YENİ: L-M sütunlarından (Payment Method + Details)
+    last_payment_method: Optional[str] = None
 
     # Çevrim ve gereksinim
     total_wager: float                             # cycle içindeki |BET_PLACED| toplamı
@@ -39,14 +39,19 @@ class MemberCycleReport(BaseModel):
     # Bonus özel alanlar
     bonus_wager: Optional[float] = None            # son bonusla yapılan toplam çevrim (bonus başlangıçlıysa)
     bonus_profit: Optional[float] = None           # bonus satırları içindeki kâr
+    bonus_to_main_amount: Optional[float] = None   # YENİ: casino_bonus_achieved toplamı (bonus→ana para)
 
-    # Unsettled (cycle) + GLOBAL (tüm dosya)
+    # Unsettled (cycle) + GLOBAL
     unsettled_count: int
     unsettled_amount: float
     unsettled_reference_ids: List[str]
+    global_unsettled_count: int
+    global_unsettled_amount: float
 
-    global_unsettled_count: int                    # YENİ
-    global_unsettled_amount: float                 # YENİ
+    # DEPOSIT özel alanlar
+    pre_deposit_unsettled_count: Optional[int] = None   # YENİ: sadece depozitten önceki açık bahis adedi
+    pre_deposit_unsettled_amount: Optional[float] = None# YENİ: sadece depozitten önceki açık bahis tutarı
+    balance_at_deposit: Optional[float] = None          # YENİ: yatırım satırındaki bakiye (Balance/Base/System)
 
     # Kârlı ilk 3 oyun/sağlayıcı
     top_games: List[TopItem]
@@ -114,10 +119,13 @@ def _norm_reason(v: Any) -> str:
     if s in {"bet_placed", "bet placed"}: return "BET_PLACED"
     if s in {"bet_settled", "bet settled"}: return "BET_SETTLED"
     if s in {"deposit", "yatırım", "yatirim"}: return "DEPOSIT"
-    if "bonus" in s or "promo" in s: return "BONUS"
+    if s in {"bonus_given", "bonus given"}: return "BONUS"
+    if s in {"casino_bonus_achieved", "casino bonus achieved"}: return "BONUS_ACHIEVED"
     if "placed" in s or "stake" in s or "wager" in s: return "BET_PLACED"
     if "settled" in s or "payout" in s or "result" in s: return "BET_SETTLED"
-    if "withdraw" in s: return "WITHDRAWAL"
+    if "withdrawal" in s: return "WITHDRAWAL"
+    if "bonus" in s and "achiev" in s: return "BONUS_ACHIEVED"
+    if "bonus" in s or "promo" in s: return "BONUS"
     return s.upper()
 
 def _cycle_bounds(df, from_idx: int) -> Tuple[int, int]:
@@ -156,11 +164,11 @@ async def compute(
 ):
     """
     Son yatırım/bonus bazlı 'cycle' tespiti ve rapor:
-      - Yatırımsa requirement=deposit_amount (1x), remaining hesaplanır.
-      - Bonus varsa bonus bilgisi + bonusla yapılan toplam çevrim (bonus_wager) ve bonus_profit.
-      - Placed/Settled eşleşmesi ile unsettled listesi (cycle) + GLOBAL (tüm dosya).
+      - DEPOSIT ise: requirement = deposit_amount (1x), remaining hesaplanır. 
+        + Sadece DEPOSIT öncesi UNSETTLED hesaplanır (pre_deposit_*), balance_at_deposit döner.
+      - BONUS ise: bonus bilgisi + bonusla yapılan toplam çevrim (bonus_wager) + bonustan ana paraya geçen tutar (BONUS_ACHIEVED toplamı).
+      - Placed/Settled eşleşmesi ile cycle UNSETTLED + GLOBAL UNSETTLED.
       - Oyun/sağlayıcı bazında kâr, ilk 3 pozitif kârlı item.
-      - Yatırım yöntemi (Payment Method + Details) rapora eklenir.
     """
     import pandas as pd  # type: ignore
     import numpy as np   # type: ignore
@@ -176,9 +184,10 @@ async def compute(
     col_game = _col(df, "Game Name", "Game")
     col_provider = _col(df, "Game Provider", "Provider")
     col_amount = _col(df, "Amount", "Base Amount", "Bet Amount", "Stake")
-    col_payment = _col(df, "Payment Method", "Method")    # L sütunu
-    col_details = _col(df, "Details", "Note")             # M sütunu
+    col_payment = _col(df, "Payment Method", "Method")
+    col_details = _col(df, "Details", "Note")
     col_currency = _col(df, "Currency", "Base Currency", "System Currency")
+    col_balance = _col(df, "Balance", "Base Balance", "System Balance")  # depozitoda bakiyeyi yakalamak için
 
     missing = [("Date & Time", col_ts), ("Player ID", col_member), ("Reason", col_reason), ("Amount", col_amount)]
     missing = [name for name, v in missing if not v]
@@ -188,12 +197,10 @@ async def compute(
     # Temizlik ve tip dönüşümü
     df[col_ts] = _to_dt(df[col_ts])
     df[col_amount] = pd.to_numeric(df[col_amount], errors="coerce").fillna(0.0)
-    if col_ref: df[col_ref] = df[col_ref].astype(str)
-    if col_game: df[col_game] = df[col_game].astype(str)
-    if col_provider: df[col_provider] = df[col_provider].astype(str)
-    if col_payment: df[col_payment] = df[col_payment].astype(str)
-    if col_details: df[col_details] = df[col_details].astype(str)
-    if col_currency: df[col_currency] = df[col_currency].astype(str)
+    for c in [col_ref, col_game, col_provider, col_payment, col_details, col_currency]:
+        if c: df[c] = df[c].astype(str)
+    if col_balance:
+        df[col_balance] = pd.to_numeric(df[col_balance], errors="coerce")
 
     # Tarih filtresi (opsiyonel)
     if date_from:
@@ -240,28 +247,29 @@ async def compute(
             last_op_i = last_bonus_i
             last_op_type = "BONUS"
 
+        # Varsayılan alanlar
+        last_ts = None
+        deposit_amt = None
+        bonus_name = None
+        bonus_amt = None
+        last_pay_method = None
+        balance_at_deposit = None
+
         if last_op_i is None:
             # Hiç yatırım/bonus yok → tüm veri tek açık cycle; requirement 0
             cycle_start, cycle_end = 0, len(g)
-            last_ts = None
-            deposit_amt = None
-            bonus_name = None
-            bonus_amt = None
-            last_pay_method = None
         else:
             cycle_start, cycle_end = _cycle_bounds(g, last_op_i)
-            last_ts = str(g.loc[last_op_i, col_ts]) if col_ts and (pd.notna(g.loc[last_op_i, col_ts])) else None
-            # Son işlem bilgileri
+            last_ts = str(g.loc[last_op_i, col_ts]) if col_ts and (g.loc[last_op_i, col_ts] is not None) else None
+
             if last_op_type == "DEPOSIT":
                 deposit_amt = float(g.loc[last_op_i, col_amount])
                 pm = str(g.loc[last_op_i, col_payment]) if col_payment else ""
                 dt = str(g.loc[last_op_i, col_details]) if col_details else ""
                 last_pay_method = " / ".join([x for x in [pm, dt] if x]).strip() or None
-                bonus_amt = None
-                bonus_name = None
-            else:
-                deposit_amt = None
-                last_pay_method = None
+                if col_balance:
+                    balance_at_deposit = float(g.loc[last_op_i, col_balance]) if g.loc[last_op_i, col_balance] == g.loc[last_op_i, col_balance] else None
+            else:  # BONUS
                 bonus_amt = float(g.loc[last_op_i, col_amount])
                 rtxt = str(g.loc[last_op_i, col_reason] or "")
                 dtxt = str(g.loc[last_op_i, col_details] or "") if col_details else ""
@@ -274,7 +282,7 @@ async def compute(
         settled_mask = cycle["__reason_type"] == "BET_SETTLED"
 
         # Çevrim (mutlak placed toplamı) ve profit
-        total_wager = float(np.abs(cycle.loc[placed_mask, col_amount]).sum())
+        total_wager = float((cycle.loc[placed_mask, col_amount].abs()).sum())
         total_profit = float(cycle.loc[settled_mask, col_amount].sum() + cycle.loc[placed_mask, col_amount].sum())
 
         # Requirement/Remaining
@@ -290,17 +298,31 @@ async def compute(
             diff_c = sorted(list(placed_rids_c - settled_rids_c))
             unsettled_ids = diff_c
             if diff_c:
-                unsettled_amount = float(np.abs(cycle.loc[placed_mask & cycle[col_ref].isin(diff_c), col_amount]).sum())
+                unsettled_amount = float(cycle.loc[placed_mask & cycle[col_ref].isin(diff_c), col_amount].abs().sum())
 
         # GLOBAL UNSETTLED (önceden hazırlandı)
         gu_count, gu_amount = global_unsettled_map.get(str(member_id), (0, 0.0))
 
-        # Bonus çevrimi ve kâr (eğer bonusla başlamışsa)
-        bonus_wager = None
-        bonus_profit = None
+        # DEPOSIT ise: yalnızca DEPOSIT ÖNCESİ UNSETTLED hesapla (isteğine uygun)
+        pre_dep_count = None
+        pre_dep_amount = None
+        if last_op_type == "DEPOSIT" and last_op_i is not None and col_ref:
+            pre = g.iloc[:last_op_i]  # depozitodan ÖNCEKİ satırlar
+            placed_pre = pre[pre["__reason_type"] == "BET_PLACED"]
+            settled_pre = pre[pre["__reason_type"] == "BET_SETTLED"]
+            if not placed_pre.empty:
+                placed_r = set(placed_pre.loc[placed_pre[col_ref].notna(), col_ref].astype(str))
+                settled_r = set(settled_pre.loc[settled_pre[col_ref].notna(), col_ref].astype(str))
+                diff_pre = placed_r - settled_r
+                pre_dep_count = int(len(diff_pre))
+                pre_dep_amount = float(placed_pre.loc[placed_pre[col_ref].isin(diff_pre), col_amount].abs().sum()) if diff_pre else 0.0
+
+        # BONUS ise: bonustan ana paraya geçen tutar (BONUS_ACHIEVED)
+        bonus_to_main_amount = None
         if last_op_type == "BONUS":
-            bonus_wager = float(np.abs(cycle.loc[placed_mask, col_amount]).sum())
-            bonus_profit = float(cycle.loc[settled_mask, col_amount].sum() + cycle.loc[placed_mask, col_amount].sum())
+            ach = cycle[cycle["__reason_type"] == "BONUS_ACHIEVED"]
+            if not ach.empty:
+                bonus_to_main_amount = float(ach[col_amount].sum())
 
         # Oyun/sağlayıcı bazında kâr (ilk 3 pozitif)
         top_games: List[TopItem] = []
@@ -341,8 +363,9 @@ async def compute(
             requirement=round(requirement, 2),
             remaining=round(remaining, 2),
 
-            bonus_wager=(round(float(bonus_wager), 2) if bonus_wager is not None else None),
-            bonus_profit=(round(float(bonus_profit), 2) if bonus_profit is not None else None),
+            bonus_wager=(round(float(total_wager), 2) if (last_op_type == "BONUS") else None),
+            bonus_profit=(round(float(total_profit), 2) if (last_op_type == "BONUS") else None),
+            bonus_to_main_amount=(round(float(bonus_to_main_amount), 2) if bonus_to_main_amount is not None else None),
 
             unsettled_count=len(unsettled_ids),
             unsettled_amount=round(float(unsettled_amount), 2),
@@ -350,6 +373,10 @@ async def compute(
 
             global_unsettled_count=int(gu_count),
             global_unsettled_amount=float(gu_amount),
+
+            pre_deposit_unsettled_count=(int(pre_dep_count) if pre_dep_count is not None else None),
+            pre_deposit_unsettled_amount=(round(float(pre_dep_amount), 2) if pre_dep_amount is not None else None),
+            balance_at_deposit=(round(float(balance_at_deposit), 2) if balance_at_deposit is not None else None),
 
             top_games=top_games,
             top_providers=top_providers,
