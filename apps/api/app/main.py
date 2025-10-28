@@ -5,9 +5,9 @@ import os
 
 app = FastAPI(title="Finans Panel API", version="0.1.0")
 
+# CORS
 origins_env = os.getenv("API_CORS_ORIGINS")
-origins = origins_env.split(",") if origins_env else ["*"]
-
+origins = [o.strip() for o in origins_env.split(",")] if origins_env else ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -16,8 +16,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/")
+async def root():
+    return {"ok": True, "service": "finanspanel-api"}
+
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "finanspanel-api", "version": "0.1.0"}
-
-app.include_router(uploads.router, prefix="/uploads", tags=["uploads"])
+    return {"status": "ok", "service": "finanspanel-api", "version": "0.1
