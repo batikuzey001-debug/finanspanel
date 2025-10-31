@@ -202,7 +202,6 @@ export default function Upload() {
                 value={selectedCycle ?? ""}
                 onChange={(e) => setSelectedCycle(e.target.value === "" ? null : Number(e.target.value))}
               >
-                {/* Boş seçenek yerine doğrudan liste */}
                 {cycles.map((c) => (
                   <option key={c.index} value={c.index}>
                     {c.label}
@@ -247,7 +246,8 @@ export default function Upload() {
                   Üye: {r.member_id}
                   {typeof r.cycle_index === "number" && (
                     <span style={{ marginLeft: 8, fontSize: 12, color: "#94a3b8" }}>
-                      • Cycle #{r.cycle_index} {r.cycle_start_at ? `(${r.cycle_start_at} → ${r.cycle_end_at || "…"})` : ""}
+                      {/* "#" + {r.cycle_index} ifadesini açık yazalım */}
+                      • Cycle # {r.cycle_index} {r.cycle_start_at ? `(${r.cycle_start_at} → ${r.cycle_end_at || "…"})` : ""}
                     </span>
                   )}
                 </div>
@@ -313,7 +313,8 @@ export default function Upload() {
                     </div>
                   </div>
                   <div style={box}>
-                    <div style={cap}>Geç Sonuçlanan — Süre > 5dk</div>
+                    {/* Buradaki > karakterini JSX stringi olarak güvenceye alıyoruz */}
+                    <div style={cap}>{`Geç Sonuçlanan — Süre > 5dk`}</div>
                     <div style={{ fontSize: 13 }}>
                       {r.late_gap_count ?? 0} adet • Toplam {r.late_gap_total_gap_minutes ?? 0} dk
                       {r.late_gap_details && r.late_gap_details.length > 0 && (
