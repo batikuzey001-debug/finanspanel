@@ -5,9 +5,7 @@ from typing import Optional, List, Dict, Any, Tuple
 
 router = APIRouter()
 
-# =========================================================
-# MODELLER
-# =========================================================
+# ===================== MODELLER =====================
 
 class UploadSummary(BaseModel):
     filename: str
@@ -18,14 +16,13 @@ class UploadSummary(BaseModel):
     row_count_exact: Optional[int] = None
 
 class CycleEntry(BaseModel):
-    index: int                       # cycle index (0..n-1)
-    start_row: int                   # df index (inclusive)
-    end_row: int                     # df index (exclusive)
-    start_at: str                    # deposit timestamp (iso str)
+    index: int
+    start_row: int
+    end_row: int
+    start_at: str
     deposit_amount: float
     payment_method: Optional[str] = None
-    bonus_after_deposit: Optional[str] = None    # varsa: "BonusName (Amount) @ ts"
-    label: str                       # UI'da dropdown'da gösterilecek metin (tarih • tutar • (bonus ...))
+    label: str                       # "tarih • tutar ₺ • [yöntem]"
 
 class CyclesResponse(BaseModel):
     filename: str
@@ -41,18 +38,16 @@ class LateItem(BaseModel):
     placed_ts: Optional[str] = None
     settled_ts: Optional[str] = None
     gap_minutes: Optional[float] = None
-    reason: str                     # "missing_placed" | "gap_over_threshold"
+    reason: str                      # "missing_placed" | "gap_over_threshold"
 
 class MemberCycleReport(BaseModel):
     member_id: str
-
-    # Cycle bilgisi
     cycle_index: int
     cycle_start_at: Optional[str]
     cycle_end_at: Optional[str]
 
-    # Son işlem bağlamı (cycle başı deposit)
-    last_operation_type: str                       # "DEPOSIT"
+    # Deposit başı bilgiler
+    last_operation_type: str
     last_operation_ts: Optional[str]
     last_deposit_amount: Optional[float] = None
     last_payment_method: Optional[str] = None
@@ -63,37 +58,37 @@ class MemberCycleReport(BaseModel):
     sum_withdrawal_declined: float
     bonus_to_main_amount: float
 
-    # Çevrim ve gereksinim
-    total_wager: float                             # Σ |BET_PLACED|
-    total_profit: float                            # Σ(SETTLED) + Σ(PLACED)
-    requirement: float                             # 1x deposit
-    remaining: float                               # max(requirement - total_wager, 0)
+    # Çevrim & kâr
+    total_wager: float
+    total_profit: float
+    requirement: float
+    remaining: float
 
-    # Unsettled (cycle) + GLOBAL
+    # Unsettled (cycle + global)
     unsettled_count: int
     unsettled_amount: float
     unsettled_reference_ids: List[str]
     global_unsettled_count: int
     global_unsettled_amount: float
 
-    # LATE uyarıları (cycle)
+    # LATE uyarıları
     late_missing_placed_count: int
     late_missing_placed_refs: List[str]
     late_gap_count: int
     late_gap_total_gap_minutes: float
     late_gap_details: List[LateItem]
 
-    # Deposit öncesi açık kupon (sadece bilgi—son cycle mantığını bozmaz)
+    # Deposit öncesi açıklar (bilgi)
     pre_deposit_unsettled_count: int
     pre_deposit_unsettled_amount: float
 
-    # Bonus bilgisi (cycle içinde deposit'ten sonra görülen ilk bonus)
+    # Bonus meta (bilgi)
     bonus_name: Optional[str] = None
     bonus_amount: Optional[float] = None
     bonus_wager: Optional[float] = None
     bonus_profit: Optional[float] = None
 
-    # Kârlı ilk 3
+    # Top-3
     top_games: List[TopItem]
     top_providers: List[TopItem]
 
@@ -105,12 +100,9 @@ class ComputeResult(BaseModel):
     reports: List[MemberCycleReport]
 
 
-# =========================================================
-# YARDIMCI
-# =========================================================
+# ===================== YARDIMCI =====================
 
 def _read_dataframe_sync(file: UploadFile):
-    """Excel/CSV okur, ilk sheet'i döner (sync)."""
     try:
         import pandas as pd  # type: ignore
     except Exception as e:
@@ -131,7 +123,7 @@ def _read_dataframe_sync(file: UploadFile):
             sheet_names = ["csv"]
             first_sheet = "csv"
         else:
-            raise HTTPException(status_code=400, detail="Desteklenmeyen dosya türü (.csv/.xlsx/.xls/.xlsm)")
+            raise HTTPException(status_code=400, detail="Desteklenmeyen dosya türü")
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Dosya okunamadı: {e}")
 
@@ -144,7 +136,6 @@ def _col(df, *cands: str) -> Optional[str]:
         c = cand.lower()
         if c in cols_lower:
             return cols_lower[c]
-    # boşlukları silerek gevşek eşleşme
     for c in df.columns:
         for cand in cands:
             if c.lower().replace(" ", "") == cand.lower().replace(" ", ""):
@@ -159,7 +150,6 @@ def _norm_reason(v: Any) -> str:
     if not isinstance(v, str):
         return ""
     s = v.strip().lower()
-    # net etiketleri önce
     if s in {"bet_placed", "bet placed"}: return "BET_PLACED"
     if s in {"bet_settled", "bet settled"}: return "BET_SETTLED"
     if s in {"deposit", "yatırım", "yatirim"}: return "DEPOSIT"
@@ -178,7 +168,6 @@ def _currency_column(df) -> Optional[str]:
     return _col(df, "Currency", "Base Currency", "System Currency")
 
 def _amount_column(df) -> str:
-    # Amount öncelik; yoksa Base Amount
     col_amount = _col(df, "Amount", "Base Amount", "Bet Amount", "Stake")
     if not col_amount:
         raise HTTPException(status_code=422, detail="Amount kolonları bulunamadı")
@@ -191,11 +180,6 @@ def _payment_str(row, col_payment: Optional[str], col_details: Optional[str]) ->
     return s or None
 
 def _pair_placed_settled(cycle_df, col_ref: Optional[str], col_ts: str) -> Tuple[Dict[str, List[int]], Dict[str, List[int]]]:
-    """
-    Aynı Reference ID için placed/settled index listeleri.
-    Reference ID boş/NaN olanlar eşleşmeye girmez.
-    """
-    import pandas as pd  # type: ignore
     placed_map: Dict[str, List[int]] = {}
     settled_map: Dict[str, List[int]] = {}
     if not col_ref:
@@ -212,7 +196,6 @@ def _pair_placed_settled(cycle_df, col_ref: Optional[str], col_ts: str) -> Tuple
         elif r == "BET_SETTLED":
             settled_map.setdefault(rid, []).append(i)
 
-    # Indexler zaman sıralı zaten; yine de güvence
     for rid in placed_map:
         placed_map[rid].sort(key=lambda ix: cycle_df.iloc[ix][col_ts])
     for rid in settled_map:
@@ -220,16 +203,14 @@ def _pair_placed_settled(cycle_df, col_ref: Optional[str], col_ts: str) -> Tuple
 
     return placed_map, settled_map
 
-def _format_t(ts_val) -> Optional[str]:
+def _fmt(ts_val) -> Optional[str]:
     try:
         return str(ts_val) if ts_val is not None else None
     except Exception:
         return None
 
 
-# =========================================================
-# ENDPOINTLER
-# =========================================================
+# ===================== ENDPOINTLER =====================
 
 @router.post("", response_model=UploadSummary)
 async def upload_file(file: UploadFile = File(...)):
@@ -246,11 +227,8 @@ async def upload_file(file: UploadFile = File(...)):
 @router.post("/cycles", response_model=CyclesResponse)
 async def list_cycles(file: UploadFile = File(...), member_id: Optional[str] = Form(None)):
     """
-    Yatırım bazlı cycle listesi (UI dropdown için).
-    - Cycle = Deposit satırından bir sonraki Deposit'e kadar.
-    - Label: "{ts} • {deposit_amount} ₺ • (Bonus: {amount})"
-    - Bonus: deposit'ten sonra görülen ilk BONUS_GIVEN bilgisinden türetilir.
-    - member_id verilirse sadece o oyuncunun cycle'ları döner.
+    Yalnızca DEPOSIT satırlarından cycle üretir (Deposit → next Deposit).
+    Dropdown etiketi: "{tarih} • {tutar} ₺ • [yöntem]".
     """
     import pandas as pd  # type: ignore
     df, _, _ = _read_dataframe_sync(file)
@@ -262,10 +240,9 @@ async def list_cycles(file: UploadFile = File(...), member_id: Optional[str] = F
     col_payment = _col(df, "Payment Method", "Method")
     col_details = _col(df, "Details", "Note")
 
-    missing = [("Date & Time", col_ts), ("Player ID", col_member), ("Reason", col_reason)]
-    missing = [name for name, v in missing if not v]
-    if missing:
-        raise HTTPException(status_code=422, detail=f"Eksik kolon(lar): {', '.join(missing)}")
+    for name, col in [("Date & Time", col_ts), ("Player ID", col_member), ("Reason", col_reason)]:
+        if not col:
+            raise HTTPException(status_code=422, detail=f"Eksik kolon: {name}")
 
     df[col_ts] = _to_dt(df[col_ts])
     df[col_amount] = pd.to_numeric(df[col_amount], errors="coerce").fillna(0.0)
@@ -278,34 +255,15 @@ async def list_cycles(file: UploadFile = File(...), member_id: Optional[str] = F
     cycles: List[CycleEntry] = []
     dep_idx = df.index[df["__reason_type"] == "DEPOSIT"].tolist()
     if not dep_idx:
-        # Deposit yoksa "tek açık cycle" üretmeyelim; UI cycle gerektiriyor.
         return CyclesResponse(filename=file.filename, total_rows=int(len(df)), cycles=[])
 
     for i, s_idx in enumerate(dep_idx):
         e_idx = dep_idx[i + 1] if i + 1 < len(dep_idx) else len(df)
         row = df.iloc[s_idx]
-        start_at = _format_t(row[col_ts])
+        start_at = _fmt(row[col_ts])
         deposit_amount = float(row[col_amount])
         pay = _payment_str(row, col_payment, col_details)
-
-        # deposit'ten sonra görülen ilk bonus_given (etiket)
-        bonus_label = None
-        sub = df.iloc[s_idx + 1:e_idx]
-        if not sub.empty:
-            bg = sub[sub["__reason_type"] == "BONUS_GIVEN"]
-            if not bg.empty:
-                b_row = bg.iloc[0]
-                b_amount = float(b_row[col_amount])
-                b_name = str(b_row[col_details] or b_row[col_reason] or "Bonus").strip() if col_details else str(b_row[col_reason] or "Bonus")
-                b_ts = _format_t(b_row[col_ts])
-                bonus_label = f"{b_name} ({b_amount:,.2f} ₺) @ {b_ts}"
-
-        label = f"{start_at} • {deposit_amount:,.2f} ₺"
-        if bonus_label:
-            label += f" • (Bonus: {bonus_label})"
-        if pay:
-            label += f" • [{pay}]"
-
+        label = f"{start_at} • {deposit_amount:,.2f} ₺" + (f" • [{pay}]" if pay else "")
         cycles.append(CycleEntry(
             index=i,
             start_row=int(s_idx),
@@ -313,7 +271,6 @@ async def list_cycles(file: UploadFile = File(...), member_id: Optional[str] = F
             start_at=start_at or "",
             deposit_amount=round(deposit_amount, 2),
             payment_method=pay,
-            bonus_after_deposit=bonus_label,
             label=label
         ))
 
@@ -322,19 +279,10 @@ async def list_cycles(file: UploadFile = File(...), member_id: Optional[str] = F
 @router.post("/compute", response_model=ComputeResult)
 async def compute(
     file: UploadFile = File(...),
-    cycle_index: Optional[int] = Form(None),              # Seçilen cycle (list_cycles'tan gelen index)
-    member_id: Optional[str] = Form(None),                # İstenirse tek oyuncu
-    threshold_minutes: int = Form(5),                     # LATE tespiti için eşik
+    cycle_index: Optional[int] = Form(None),     # Seçilen DEPOSIT cycle index'i
+    member_id: Optional[str] = Form(None),
+    threshold_minutes: int = Form(5),            # LATE eşiği (dk)
 ):
-    """
-    Seçilen cycle'dan itibaren (Deposit → next Deposit) tüm metrikleri hesaplar:
-      - Finansal akış: adjustment / withdrawal / bonus_achieved
-      - Çevrim (Σ|BET_PLACED|), kâr (Σ settled + Σ placed), requirement=1x deposit
-      - Unsettled (cycle + global)
-      - LATE (missing placed + gap>threshold)
-      - Bonus meta (varsa): isim/kod, tutar, bonus_wager/profit
-      - Kârlı top3 oyun/sağlayıcı
-    """
     import pandas as pd  # type: ignore
     import numpy as np   # type: ignore
 
@@ -353,12 +301,10 @@ async def compute(
     col_currency = _currency_column(df)
     col_balance = _col(df, "Balance", "Base Balance", "System Balance")
 
-    missing = [("Date & Time", col_ts), ("Player ID", col_member), ("Reason", col_reason)]
-    missing = [name for name, v in missing if not v]
-    if missing:
-        raise HTTPException(status_code=422, detail=f"Eksik kolon(lar): {', '.join(missing)}")
+    for name, col in [("Date & Time", col_ts), ("Player ID", col_member), ("Reason", col_reason)]:
+        if not col:
+            raise HTTPException(status_code=422, detail=f"Eksik kolon: {name}")
 
-    # Tip dönüşümleri
     df[col_ts] = _to_dt(df[col_ts])
     df[col_amount] = pd.to_numeric(df[col_amount], errors="coerce").fillna(0.0)
     for c in [col_ref, col_game, col_provider, col_payment, col_details, col_currency]:
@@ -367,49 +313,44 @@ async def compute(
     df["__reason_type"] = df[col_reason].apply(_norm_reason)
     df = df.sort_values(col_ts).reset_index(drop=True)
 
-    # MEMBER filtresi
     if member_id:
         df = df[df[col_member].astype(str) == str(member_id)].reset_index(drop=True)
 
-    # Cycle sınırlarını üret
+    # DEPOSIT bazlı cycle sınırları
     dep_idx = df.index[df["__reason_type"] == "DEPOSIT"].tolist()
     if not dep_idx:
-        raise HTTPException(status_code=422, detail="Bu dosyada DEPOSIT bulunamadı; cycle için yatırım gerekli.")
+        raise HTTPException(status_code=422, detail="Bu dosyada DEPOSIT bulunamadı.")
+    bounds: List[Tuple[int, int]] = []
+    for i, s in enumerate(dep_idx):
+        e = dep_idx[i + 1] if i + 1 < len(dep_idx) else len(df)
+        bounds.append((int(s), int(e)))
 
-    cycles_bounds: List[Tuple[int, int]] = []
-    for i, s_idx in enumerate(dep_idx):
-        e_idx = dep_idx[i + 1] if i + 1 < len(dep_idx) else len(df)
-        cycles_bounds.append((int(s_idx), int(e_idx)))
-
-    # cycle_index yoksa: en son yatırımı al
     if cycle_index is None:
-        cycle_index = len(cycles_bounds) - 1
-    if cycle_index < 0 or cycle_index >= len(cycles_bounds):
+        cycle_index = len(bounds) - 1
+    if cycle_index < 0 or cycle_index >= len(bounds):
         raise HTTPException(status_code=400, detail=f"Geçersiz cycle_index: {cycle_index}")
 
-    start_idx, end_idx = cycles_bounds[cycle_index]
+    start_idx, end_idx = bounds[cycle_index]
     cycle = df.iloc[start_idx:end_idx].copy()
 
-    # Başlangıç satırı (deposit)
     dep_row = df.iloc[start_idx]
-    cycle_start_at = _format_t(dep_row[col_ts])
-    cycle_end_at = _format_t(df.iloc[end_idx - 1][col_ts]) if end_idx - 1 >= start_idx else None
+    cycle_start_at = _fmt(dep_row[col_ts])
+    cycle_end_at = _fmt(df.iloc[end_idx - 1][col_ts]) if end_idx - 1 >= start_idx else None
     deposit_amount = float(dep_row[col_amount])
     payment_method = _payment_str(dep_row, col_payment, col_details)
     balance_at_deposit = float(dep_row[col_balance]) if col_balance and pd.notna(dep_row[col_balance]) else None
 
-    # Bonus meta (deposit'ten sonra görülen ilk BONUS_GIVEN)
+    # Deposit'ten sonra görülen ilk BONUS_GIVEN (bilgi)
     bonus_name = None
     bonus_amount = None
-    sub_after = cycle.iloc[1:] if len(cycle) > 1 else cycle.iloc[0:0]
-    if not sub_after.empty:
+    if len(cycle) > 1:
+        sub_after = cycle.iloc[1:]
         bg = sub_after[sub_after["__reason_type"] == "BONUS_GIVEN"]
         if not bg.empty:
             b_row = bg.iloc[0]
             bonus_amount = float(b_row[col_amount])
             bonus_name = (str(b_row[col_details] or b_row[col_reason]) if col_details else str(b_row[col_reason])).strip() or "Bonus"
 
-    # Mask'ler
     placed_mask = cycle["__reason_type"] == "BET_PLACED"
     settled_mask = cycle["__reason_type"] == "BET_SETTLED"
     adj_mask = cycle["__reason_type"] == "ADJUSTMENT"
@@ -417,13 +358,11 @@ async def compute(
     wdr_dec_mask = cycle["__reason_type"] == "WITHDRAWAL_DECLINE"
     bon_ach_mask = cycle["__reason_type"] == "BONUS_ACHIEVED"
 
-    # Finansal akış
     sum_adjustment = float(cycle.loc[adj_mask, col_amount].sum()) if adj_mask.any() else 0.0
     sum_withdrawal_approved = float(cycle.loc[wdr_mask, col_amount].sum()) if wdr_mask.any() else 0.0
     sum_withdrawal_declined = float(cycle.loc[wdr_dec_mask, col_amount].sum()) if wdr_dec_mask.any() else 0.0
     bonus_to_main_amount = float(cycle.loc[bon_ach_mask, col_amount].sum()) if bon_ach_mask.any() else 0.0
 
-    # Çevrim ve kâr
     total_wager = float(cycle.loc[placed_mask, col_amount].abs().sum())
     total_profit = float(cycle.loc[settled_mask, col_amount].sum() + cycle.loc[placed_mask, col_amount].sum())
 
@@ -441,7 +380,7 @@ async def compute(
         if diff_c:
             unsettled_amount = float(cycle.loc[placed_mask & cycle[col_ref].isin(diff_c), col_amount].abs().sum())
 
-    # Global unsettled (dosyanın tamamında)
+    # Global unsettled
     global_unsettled_count = 0
     global_unsettled_amount = 0.0
     if col_ref:
@@ -454,7 +393,7 @@ async def compute(
         if diff_all:
             global_unsettled_amount = float(df.loc[placed_all & df[col_ref].isin(diff_all), col_amount].abs().sum())
 
-    # Pre-deposit unsettled (deposit'tan önceki açıklar, bilgi amaçlı)
+    # Pre-deposit unsettled (bilgi)
     pre_dep_unset_count = 0
     pre_dep_unset_amount = 0.0
     if col_ref and start_idx > 0:
@@ -472,36 +411,31 @@ async def compute(
     bonus_wager = None
     bonus_profit = None
     if bonus_name is not None:
-        # bonus verildiği andan cycle sonuna kadar
-        idx_bonus = sub_after.index[sub_after["__reason_type"] == "BONUS_GIVEN"]
+        idx_bonus = cycle.index[cycle["__reason_type"] == "BONUS_GIVEN"]
         if len(idx_bonus):
-            b0 = int(idx_bonus[0]) - start_idx  # cycle içi relative index
-            sub_b = cycle.iloc[b0:]
+            b0 = int(idx_bonus[0]) - start_idx
+            sub_b = cycle.iloc[(b0 - (b0 - start_idx)):]  # cycle içinden bonus sonrası
             pm_b = sub_b["__reason_type"] == "BET_PLACED"
             sm_b = sub_b["__reason_type"] == "BET_SETTLED"
             bonus_wager = float(sub_b.loc[pm_b, col_amount].abs().sum())
             bonus_profit = float(sub_b.loc[sm_b, col_amount].sum() + sub_b.loc[pm_b, col_amount].sum())
 
-    # LATE tespit: missing placed + gap>threshold
+    # LATE tespit (missing placed + gap>threshold)
     late_missing_placed_refs: List[str] = []
     late_gap_details: List[LateItem] = []
     late_gap_total = 0.0
 
     placed_map, settled_map = _pair_placed_settled(cycle, col_ref, col_ts)
-    # reference id yoksa "geç" analizi id'siz satırlara uygulanmaz
     if col_ref:
         for rid, s_idxs in settled_map.items():
             p_idxs = placed_map.get(rid, [])
-            # pairing by order
             max_pairs = max(len(p_idxs), len(s_idxs))
             for k in range(max_pairs):
                 p_i = p_idxs[k] if k < len(p_idxs) else None
                 s_i = s_idxs[k] if k < len(s_idxs) else None
                 if p_i is None and s_i is not None:
-                    # settled var, placed yok
                     late_missing_placed_refs.append(rid)
                 elif p_i is not None and s_i is not None:
-                    # gap ölç
                     p_ts = cycle.iloc[p_i][col_ts]
                     s_ts = cycle.iloc[s_i][col_ts]
                     if p_ts is not None and s_ts is not None:
@@ -509,15 +443,14 @@ async def compute(
                         if gap_min > float(threshold_minutes):
                             late_gap_details.append(LateItem(
                                 reference_id=rid,
-                                placed_ts=_format_t(p_ts),
-                                settled_ts=_format_t(s_ts),
+                                placed_ts=_fmt(p_ts),
+                                settled_ts=_fmt(s_ts),
                                 gap_minutes=round(float(gap_min), 2),
                                 reason="gap_over_threshold"
                             ))
                             late_gap_total += gap_min
-                # if p_i not None and s_i None durumunu "open" zaten üstte ele aldık
 
-    # Kârlı top 3 (pozitif net)
+    # Top-3 (pozitif net)
     top_games: List[TopItem] = []
     top_providers: List[TopItem] = []
     if col_game:
@@ -539,10 +472,7 @@ async def compute(
         pp = pp[pp > 0].sort_values(ascending=False).head(3)
         top_providers = [TopItem(name=str(k), value=round(float(v), 2)) for k, v in pp.items()]
 
-    # Para birimi (varsa)
     currency = (str(cycle[col_currency].iloc[0]) if col_currency and not cycle[col_currency].empty else None)
-
-    # Rapor (tek üye bağlamı — cycle deposit satırı kime aitse oradan alınıyor)
     member_val = str(dep_row[col_member])
 
     report = MemberCycleReport(
@@ -592,8 +522,4 @@ async def compute(
         currency=currency
     )
 
-    return ComputeResult(
-        filename=file.filename,
-        total_rows=total_rows,
-        reports=[report]
-    )
+    return ComputeResult(filename=file.filename, total_rows=total_rows, reports=[report])
