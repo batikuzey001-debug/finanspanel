@@ -17,7 +17,7 @@ const API = (import.meta.env.VITE_API_BASE_URL as string) || "http://localhost:8
 type Summary = { filename: string; sheet_names: string[]; first_sheet: string | null; columns: string[]; row_count_sampled: number; row_count_exact?: number; };
 
 type TopItem = { name: string; value: number };
-type LateItem = { reference_id: string; placed_ts?: string | null; settled_ts?: string | null; gap_minutes?: number | null; reason: string };
+type BetItem = { reference_id?: string | null; placed_ts?: string | null; settled_ts?: string | null; gap_minutes?: number | null; placed_amount?: number | null; settled_amount?: number | null; };
 
 type Report = {
   member_id: string;
@@ -39,25 +39,33 @@ type Report = {
   requirement: number;
   remaining: number;
 
-  unsettled_count: number;
-  unsettled_amount: number;
-  unsettled_reference_ids: string[];
+  main_wager: number;
+  main_profit: number;
+  bonus_wager: number;
+  bonus_profit: number;
+  adjustment_wager: number;
+  adjustment_profit: number;
+
+  open_count: number;
+  open_amount: number;
+  open_list: BetItem[];
+
+  late_missing_count: number;
+  late_missing_amount: number;
+  late_missing_list: BetItem[];
+
+  late_gap_count: number;
+  late_gap_total_gap_minutes: number;
+  late_gap_list: BetItem[];
+
   global_unsettled_count: number;
   global_unsettled_amount: number;
 
-  late_missing_placed_count?: number;
-  late_missing_placed_refs?: string[];
-  late_gap_count?: number;
-  late_gap_total_gap_minutes?: number;
-  late_gap_details?: LateItem[];
-
-  pre_deposit_unsettled_count?: number | null;
-  pre_deposit_unsettled_amount?: number | null;
+  pre_deposit_unsettled_count: number;
+  pre_deposit_unsettled_amount: number;
 
   bonus_name?: string | null;
   bonus_amount?: number | null;
-  bonus_wager?: number | null;
-  bonus_profit?: number | null;
 
   top_games: TopItem[];
   top_providers: TopItem[];
@@ -196,14 +204,23 @@ export default function Upload() {
                 <div style={tiny}>{r.last_operation_type}{r.last_operation_ts ? ` • ${r.last_operation_ts}` : ""}</div>
               </div>
 
-              {/* Satır 1: Yatırım / Yöntem / Birim */}
+              {/* 1) Kaynağa göre özet (Ana Para / Bonus / Adjustment) */}
               <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12 }}>
-                <div style={box}><div style={cap}>Yatırım</div><div>{fmt(r.last_deposit_amount)}</div></div>
-                <div style={box}><div style={cap}>Yöntem</div><div style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.last_payment_method || "-"}</div></div>
-                <div style={box}><div style={cap}>Birim</div><div>{r.currency || "TRY"}</div></div>
+                <div style={box}>
+                  <div style={cap}>Ana Para</div>
+                  <div>Çevrim: {fmt(r.main_wager)} • Kâr: <b style={{ color: r.main_profit >= 0 ? "#34d399" : "#f87171" }}>{fmt(r.main_profit)}</b></div>
+                </div>
+                <div style={box}>
+                  <div style={cap}>Bonus {r.bonus_name ? `(${r.bonus_name})` : ""}</div>
+                  <div>Çevrim: {fmt(r.bonus_wager)} • Kâr: <b style={{ color: r.bonus_profit >= 0 ? "#34d399" : "#f87171" }}>{fmt(r.bonus_profit)}</b></div>
+                </div>
+                <div style={box}>
+                  <div style={cap}>Adjustment</div>
+                  <div>Çevrim: {fmt(r.adjustment_wager)} • Kâr: <b style={{ color: r.adjustment_profit >= 0 ? "#34d399" : "#f87171" }}>{fmt(r.adjustment_profit)}</b></div>
+                </div>
               </div>
 
-              {/* Satır 2: Çevrim / Gereksinim / Kalan / Kâr */}
+              {/* 2) Genel toplamlar */}
               <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginTop: 8 }}>
                 <div style={box}><div style={cap}>Toplam Çevrim</div><div>{fmt(r.total_wager)}</div></div>
                 <div style={box}><div style={cap}>Gereksinim (1x)</div><div>{fmt(r.requirement)}</div></div>
@@ -211,47 +228,46 @@ export default function Upload() {
                 <div style={box}><div style={cap}>Toplam Kâr</div><div style={{ color: r.total_profit >= 0 ? "#34d399" : "#f87171", fontWeight: 800 }}>{fmt(r.total_profit)}</div></div>
               </div>
 
-              {/* Satır 3: Unsettled & Global */}
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginTop: 8 }}>
-                <div style={box}><div style={cap}>Unsettled (Cycle)</div><div>{r.unsettled_count} adet • {fmt(r.unsettled_amount)}</div></div>
-                <div style={box}><div style={cap}>Unsettled (Global)</div><div>{r.global_unsettled_count} adet • {fmt(r.global_unsettled_amount)}</div></div>
-                <div style={box}><div style={cap}>Bonus → Ana Para</div><div>{fmt(r.bonus_to_main_amount)}</div></div>
+              {/* 3) Açık & Geç sonuçlanan — TUTAR + TARİH + ID */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginTop: 8 }}>
+                <div style={box}>
+                  <div style={cap}>Açık Bahis (PLACED var, SETTLED yok)</div>
+                  <div>{r.open_count} adet • {fmt(r.open_amount)}</div>
+                  {r.open_list?.length ? (
+                    <ul style={{ margin: "6px 0 0 16px" }}>
+                      {r.open_list.slice(0, 8).map((b, i) => (
+                        <li key={`o-${i}`}>#{b.reference_id || "-"} • {b.placed_ts} • {fmt(b.placed_amount)}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+
+                <div style={box}>
+                  <div style={cap}>Geç — Eksik PLACED (SETTLED var)</div>
+                  <div>{r.late_missing_count} adet • {fmt(r.late_missing_amount)}</div>
+                  {r.late_missing_list?.length ? (
+                    <ul style={{ margin: "6px 0 0 16px" }}>
+                      {r.late_missing_list.slice(0, 8).map((b, i) => (
+                        <li key={`m-${i}`}>#{b.reference_id || "-"} • S: {b.settled_ts} • {fmt(b.settled_amount)}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+
+                <div style={box}>
+                  <div style={cap}>{`Geç — Süre > 5dk (eşlenenler)`}</div>
+                  <div>{r.late_gap_count} adet • Toplam {r.late_gap_total_gap_minutes} dk</div>
+                  {r.late_gap_list?.length ? (
+                    <ul style={{ margin: "6px 0 0 16px" }}>
+                      {r.late_gap_list.slice(0, 8).map((b, i) => (
+                        <li key={`g-${i}`}>#{b.reference_id || "-"} • P: {b.placed_ts} • S: {b.settled_ts} • {b.gap_minutes} dk • {fmt(b.placed_amount)} → {fmt(b.settled_amount)}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
               </div>
 
-              {/* Satır 4: LATE uyarıları */}
-              {(r.late_missing_placed_count || r.late_gap_count) && (
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 8 }}>
-                  <div style={box}>
-                    <div style={cap}>Geç Sonuçlanan — Eksik PLACED</div>
-                    <div style={{ fontSize: 13 }}>
-                      {r.late_missing_placed_count ?? 0} adet
-                      {r.late_missing_placed_refs && r.late_missing_placed_refs.length > 0 && (
-                        <ul style={{ margin: "6px 0 0 16px" }}>
-                          {r.late_missing_placed_refs.slice(0, 8).map((id) => <li key={id}>{id}</li>)}
-                        </ul>
-                      )}
-                    </div>
-                  </div>
-                  <div style={box}>
-                    <div style={cap}>{`Geç Sonuçlanan — Süre > 5dk`}</div>
-                    <div style={{ fontSize: 13 }}>
-                      {r.late_gap_count ?? 0} adet • Toplam {r.late_gap_total_gap_minutes ?? 0} dk
-                      {r.late_gap_details && r.late_gap_details.length > 0 && (
-                        <ul style={{ margin: "6px 0 0 16px" }}>
-                          {r.late_gap_details.slice(0, 5).map((it, i) => (
-                            <li key={`${it.reference_id}-${i}`}>
-                              #{it.reference_id} • {it.gap_minutes} dk
-                              {it.placed_ts ? ` • P: ${it.placed_ts}` : ""}{it.settled_ts ? ` • S: ${it.settled_ts}` : ""}
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Satır 5: Top 3 Oyun / Sağlayıcı */}
+              {/* 4) Top-3 Kârlı Oyun / Sağlayıcı */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 8 }}>
                 <div style={box}>
                   <div style={cap}>En Kârlı 3 Oyun</div>
@@ -265,6 +281,13 @@ export default function Upload() {
                     {r.top_providers.length ? r.top_providers.map((p) => <li key={p.name}>{p.name}: {fmt(p.value)}</li>) : <li>-</li>}
                   </ul>
                 </div>
+              </div>
+
+              {/* 5) Bilgi şeridi */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginTop: 8 }}>
+                <div style={box}><div style={cap}>Withdrawal (Onaylı)</div><div>{fmt(r.sum_withdrawal_approved)}</div></div>
+                <div style={box}><div style={cap}>Withdrawal (İptal)</div><div>{fmt(r.sum_withdrawal_declined)}</div></div>
+                <div style={box}><div style={cap}>Bonus → Ana Para</div><div>{fmt(r.bonus_to_main_amount)}</div></div>
               </div>
             </div>
           ))}
