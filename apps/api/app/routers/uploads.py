@@ -22,7 +22,7 @@ class CycleEntry(BaseModel):
     start_at: str
     deposit_amount: float
     payment_method: Optional[str] = None
-    label: str                       # "tarih • tutar ₺ • [yöntem]"
+    label: str  # "tarih • tutar ₺ • [yöntem]"
 
 class CyclesResponse(BaseModel):
     filename: str
@@ -33,12 +33,13 @@ class TopItem(BaseModel):
     name: str
     value: float
 
-class LateItem(BaseModel):
-    reference_id: str
+class BetItem(BaseModel):
+    reference_id: Optional[str] = None
     placed_ts: Optional[str] = None
     settled_ts: Optional[str] = None
     gap_minutes: Optional[float] = None
-    reason: str                      # "missing_placed" | "gap_over_threshold"
+    placed_amount: Optional[float] = None
+    settled_amount: Optional[float] = None
 
 class MemberCycleReport(BaseModel):
     member_id: str
@@ -46,49 +47,58 @@ class MemberCycleReport(BaseModel):
     cycle_start_at: Optional[str]
     cycle_end_at: Optional[str]
 
-    # Deposit başı bilgiler
+    # Deposit başı
     last_operation_type: str
     last_operation_ts: Optional[str]
     last_deposit_amount: Optional[float] = None
     last_payment_method: Optional[str] = None
 
-    # Finansal akış (cycle içi)
+    # Finansal akış
     sum_adjustment: float
     sum_withdrawal_approved: float
     sum_withdrawal_declined: float
     bonus_to_main_amount: float
 
-    # Çevrim & kâr
+    # Çevrim & kâr (genel)
     total_wager: float
     total_profit: float
     requirement: float
     remaining: float
 
-    # Unsettled (cycle + global)
-    unsettled_count: int
-    unsettled_amount: float
-    unsettled_reference_ids: List[str]
+    # Kaynağa göre (ana para / bonus / adjustment)
+    main_wager: float
+    main_profit: float
+    bonus_wager: float
+    bonus_profit: float
+    adjustment_wager: float
+    adjustment_profit: float
+
+    # Açık & Geç sonuçlanan (adet + toplam ₺ + detay listeleri)
+    open_count: int
+    open_amount: float
+    open_list: List[BetItem]
+
+    late_missing_count: int
+    late_missing_amount: float
+    late_missing_list: List[BetItem]
+
+    late_gap_count: int
+    late_gap_total_gap_minutes: float
+    late_gap_list: List[BetItem]
+
+    # Global unsettled (bilgi)
     global_unsettled_count: int
     global_unsettled_amount: float
 
-    # LATE uyarıları
-    late_missing_placed_count: int
-    late_missing_placed_refs: List[str]
-    late_gap_count: int
-    late_gap_total_gap_minutes: float
-    late_gap_details: List[LateItem]
-
-    # Deposit öncesi açıklar (bilgi)
+    # Deposit öncesi açık (bilgi)
     pre_deposit_unsettled_count: int
     pre_deposit_unsettled_amount: float
 
     # Bonus meta (bilgi)
     bonus_name: Optional[str] = None
     bonus_amount: Optional[float] = None
-    bonus_wager: Optional[float] = None
-    bonus_profit: Optional[float] = None
 
-    # Top-3
+    # Top-3 (kâra göre)
     top_games: List[TopItem]
     top_providers: List[TopItem]
 
@@ -178,30 +188,6 @@ def _payment_str(row, col_payment: Optional[str], col_details: Optional[str]) ->
     dt = str(row[col_details]).strip() if col_details and row.get(col_details) is not None else ""
     s = " / ".join([x for x in [pm, dt] if x])
     return s or None
-
-def _pair_placed_settled(cycle_df, col_ref: Optional[str], col_ts: str) -> Tuple[Dict[str, List[int]], Dict[str, List[int]]]:
-    placed_map: Dict[str, List[int]] = {}
-    settled_map: Dict[str, List[int]] = {}
-    if not col_ref:
-        return placed_map, settled_map
-
-    ref_series = cycle_df[col_ref].astype(str)
-    reason = cycle_df["__reason_type"]
-
-    for i, (rid, r) in enumerate(zip(ref_series, reason)):
-        if rid.lower() in ("", "nan", "none"):
-            continue
-        if r == "BET_PLACED":
-            placed_map.setdefault(rid, []).append(i)
-        elif r == "BET_SETTLED":
-            settled_map.setdefault(rid, []).append(i)
-
-    for rid in placed_map:
-        placed_map[rid].sort(key=lambda ix: cycle_df.iloc[ix][col_ts])
-    for rid in settled_map:
-        settled_map[rid].sort(key=lambda ix: cycle_df.iloc[ix][col_ts])
-
-    return placed_map, settled_map
 
 def _fmt(ts_val) -> Optional[str]:
     try:
@@ -293,6 +279,7 @@ async def compute(
     col_member = _col(df, "Player ID", "member_id", "User ID", "Account ID")
     col_reason = _col(df, "Reason", "Description", "Event")
     col_ref = _col(df, "Reference ID", "Ref ID", "Bet ID", "Ticket")
+    col_betcid = _col(df, "BetCID", "Bet CID")
     col_game = _col(df, "Game Name", "Game")
     col_provider = _col(df, "Game Provider", "Provider")
     col_amount = _amount_column(df)
@@ -305,9 +292,10 @@ async def compute(
         if not col:
             raise HTTPException(status_code=422, detail=f"Eksik kolon: {name}")
 
+    # Normalize
     df[col_ts] = _to_dt(df[col_ts])
     df[col_amount] = pd.to_numeric(df[col_amount], errors="coerce").fillna(0.0)
-    for c in [col_ref, col_game, col_provider, col_payment, col_details, col_currency]:
+    for c in [col_ref, col_betcid, col_game, col_provider, col_payment, col_details, col_currency]:
         if c: df[c] = df[c].astype(str)
 
     df["__reason_type"] = df[col_reason].apply(_norm_reason)
@@ -316,7 +304,7 @@ async def compute(
     if member_id:
         df = df[df[col_member].astype(str) == str(member_id)].reset_index(drop=True)
 
-    # DEPOSIT bazlı cycle sınırları
+    # Deposit bazlı cycle sınırları
     dep_idx = df.index[df["__reason_type"] == "DEPOSIT"].tolist()
     if not dep_idx:
         raise HTTPException(status_code=422, detail="Bu dosyada DEPOSIT bulunamadı.")
@@ -333,6 +321,7 @@ async def compute(
     start_idx, end_idx = bounds[cycle_index]
     cycle = df.iloc[start_idx:end_idx].copy()
 
+    # Başlangıç
     dep_row = df.iloc[start_idx]
     cycle_start_at = _fmt(dep_row[col_ts])
     cycle_end_at = _fmt(df.iloc[end_idx - 1][col_ts]) if end_idx - 1 >= start_idx else None
@@ -340,17 +329,18 @@ async def compute(
     payment_method = _payment_str(dep_row, col_payment, col_details)
     balance_at_deposit = float(dep_row[col_balance]) if col_balance and pd.notna(dep_row[col_balance]) else None
 
-    # Deposit'ten sonra görülen ilk BONUS_GIVEN (bilgi)
+    # Bonus meta (deposit'ten sonra görülen ilk BONUS_GIVEN)
     bonus_name = None
     bonus_amount = None
-    if len(cycle) > 1:
-        sub_after = cycle.iloc[1:]
+    sub_after = cycle.iloc[1:] if len(cycle) > 1 else cycle.iloc[0:0]
+    if not sub_after.empty:
         bg = sub_after[sub_after["__reason_type"] == "BONUS_GIVEN"]
         if not bg.empty:
             b_row = bg.iloc[0]
             bonus_amount = float(b_row[col_amount])
             bonus_name = (str(b_row[col_details] or b_row[col_reason]) if col_details else str(b_row[col_reason])).strip() or "Bonus"
 
+    # Mask'ler
     placed_mask = cycle["__reason_type"] == "BET_PLACED"
     settled_mask = cycle["__reason_type"] == "BET_SETTLED"
     adj_mask = cycle["__reason_type"] == "ADJUSTMENT"
@@ -358,29 +348,141 @@ async def compute(
     wdr_dec_mask = cycle["__reason_type"] == "WITHDRAWAL_DECLINE"
     bon_ach_mask = cycle["__reason_type"] == "BONUS_ACHIEVED"
 
+    # Finansal akış
     sum_adjustment = float(cycle.loc[adj_mask, col_amount].sum()) if adj_mask.any() else 0.0
     sum_withdrawal_approved = float(cycle.loc[wdr_mask, col_amount].sum()) if wdr_mask.any() else 0.0
     sum_withdrawal_declined = float(cycle.loc[wdr_dec_mask, col_amount].sum()) if wdr_dec_mask.any() else 0.0
     bonus_to_main_amount = float(cycle.loc[bon_ach_mask, col_amount].sum()) if bon_ach_mask.any() else 0.0
 
+    # ====== Bahis eşleştirme anahtarı (REF → BetCID → fallback) ======
+    def rid_at(i):
+        if col_ref and isinstance(cycle.iloc[i][col_ref], str) and cycle.iloc[i][col_ref].strip():
+            return f"R:{cycle.iloc[i][col_ref]}"
+        if col_betcid and isinstance(cycle.iloc[i][col_betcid], str) and cycle.iloc[i][col_betcid].strip():
+            return f"C:{cycle.iloc[i][col_betcid]}"
+        # Fallback: oyun+id+yakın zaman (dakika)
+        g = cycle.iloc[i][col_game] if col_game else ""
+        t = cycle.iloc[i][col_ts]
+        return f"F:{g}|{t}"
+
+    # placed/settled listeleri (index'ler)
+    placed_ix = cycle.index[placed_mask].tolist()
+    settled_ix = cycle.index[settled_mask].tolist()
+
+    # Anahtar → index listesi
+    from collections import defaultdict, deque
+    p_map: Dict[str, deque] = defaultdict(deque)
+    s_map: Dict[str, deque] = defaultdict(deque)
+    for i in placed_ix:
+        p_map[rid_at(cycle.index.get_loc(i))].append(i)
+    for i in settled_ix:
+        s_map[rid_at(cycle.index.get_loc(i))].append(i)
+
+    # Pairing by order (placed ↔ settled)
+    pairs: List[Tuple[int, int]] = []  # (p_i, s_i)
+    for key in set(list(p_map.keys()) + list(s_map.keys())):
+        ps, ss = p_map.get(key, deque()), s_map.get(key, deque())
+        while ps and ss:
+            pairs.append((ps.popleft(), ss.popleft()))
+    # Kalanlar
+    unpaired_p = [(k, list(v)) for k, v in p_map.items() if v]
+    unpaired_s = [(k, list(v)) for k, v in s_map.items() if v]
+
+    # ====== Kaynak ataması (ana para / bonus / adjustment) ======
+    # Her placed için, ondan ÖNCEKİ en yakın finansal olayı bul: DEPOSIT / BONUS_GIVEN / ADJUSTMENT
+    fin_mask = cycle["__reason_type"].isin(["DEPOSIT", "BONUS_GIVEN", "ADJUSTMENT"])
+    fin_ix = cycle.index[fin_mask].tolist()
+    fin_types = {i: cycle.loc[i, "__reason_type"] for i in fin_ix}
+
+    def source_for(idx: int) -> str:
+        # geriye doğru tara
+        src = "MAIN"  # default
+        for j in range(idx, start_idx - 1, -1):
+            row = cycle.loc[j]
+            t = row["__reason_type"]
+            if t in ("DEPOSIT", "BONUS_GIVEN", "ADJUSTMENT"):
+                if t == "DEPOSIT": src = "MAIN"
+                elif t == "BONUS_GIVEN": src = "BONUS"
+                else: src = "ADJUSTMENT"
+                break
+        return src
+
+    # Toplamlar
     total_wager = float(cycle.loc[placed_mask, col_amount].abs().sum())
     total_profit = float(cycle.loc[settled_mask, col_amount].sum() + cycle.loc[placed_mask, col_amount].sum())
 
-    requirement = float(deposit_amount)
-    remaining = float(max(requirement - total_wager, 0.0))
+    main_wager = bonus_wager = adjustment_wager = 0.0
+    main_profit = bonus_profit = adjustment_profit = 0.0
 
-    # Unsettled (cycle)
-    unsettled_ids: List[str] = []
-    unsettled_amount = 0.0
-    if col_ref:
-        placed_rids_c = set(cycle.loc[placed_mask & cycle[col_ref].notna(), col_ref].astype(str))
-        settled_rids_c = set(cycle.loc[settled_mask & cycle[col_ref].notna(), col_ref].astype(str))
-        diff_c = sorted(list(placed_rids_c - settled_rids_c))
-        unsettled_ids = diff_c
-        if diff_c:
-            unsettled_amount = float(cycle.loc[placed_mask & cycle[col_ref].isin(diff_c), col_amount].abs().sum())
+    # Çiftler (tamamlanan bahisler) üzerinden profit'i yaz
+    for p_i, s_i in pairs:
+        src = source_for(cycle.index.get_loc(p_i))
+        p_amt = float(cycle.loc[p_i, col_amount])
+        s_amt = float(cycle.loc[s_i, col_amount])
+        net = p_amt + s_amt
+        abs_p = abs(p_amt)
+        if src == "MAIN":
+            main_wager += abs_p
+            main_profit += net
+        elif src == "BONUS":
+            bonus_wager += abs_p
+            bonus_profit += net
+        else:
+            adjustment_wager += abs_p
+            adjustment_profit += net
 
-    # Global unsettled
+    # Açık bahisler (placed olup eşleşmeyenler)
+    open_list: List[BetItem] = []
+    open_amount = 0.0
+    open_count = 0
+    for key, ix_list in unpaired_p:
+        for p_i in ix_list:
+            open_count += 1
+            amt = float(abs(cycle.loc[p_i, col_amount]))
+            open_amount += amt
+            open_list.append(BetItem(
+                reference_id=(cycle.loc[p_i, col_ref] if col_ref else None),
+                placed_ts=_fmt(cycle.loc[p_i, col_ts]),
+                placed_amount=round(amt, 2)
+            ))
+
+    # Geç sonuçlanan — missing placed (settled var, placed yok)
+    late_missing_list: List[BetItem] = []
+    late_missing_amount = 0.0
+    late_missing_count = 0
+    for key, ix_list in unpaired_s:
+        for s_i in ix_list:
+            late_missing_count += 1
+            amt = float(cycle.loc[s_i, col_amount])
+            late_missing_amount += amt
+            late_missing_list.append(BetItem(
+                reference_id=(cycle.loc[s_i, col_ref] if col_ref else None),
+                settled_ts=_fmt(cycle.loc[s_i, col_ts]),
+                settled_amount=round(amt, 2)
+            ))
+
+    # Geç sonuçlanan — gap > threshold (eşleşen çiftlerde)
+    late_gap_list: List[BetItem] = []
+    late_gap_total = 0.0
+    late_gap_count = 0
+    for p_i, s_i in pairs:
+        p_ts = cycle.loc[p_i, col_ts]
+        s_ts = cycle.loc[s_i, col_ts]
+        if p_ts is not None and s_ts is not None:
+            gap_min = (s_ts - p_ts).total_seconds() / 60.0
+            if gap_min > float(threshold_minutes):
+                late_gap_count += 1
+                late_gap_total += gap_min
+                late_gap_list.append(BetItem(
+                    reference_id=(cycle.loc[p_i, col_ref] if col_ref else None),
+                    placed_ts=_fmt(p_ts),
+                    settled_ts=_fmt(s_ts),
+                    gap_minutes=round(float(gap_min), 2),
+                    placed_amount=round(float(cycle.loc[p_i, col_amount]), 2),
+                    settled_amount=round(float(cycle.loc[s_i, col_amount]), 2),
+                ))
+
+    # Global unsettled (tüm dosyada)
     global_unsettled_count = 0
     global_unsettled_amount = 0.0
     if col_ref:
@@ -407,73 +509,24 @@ async def compute(
         if diff_pre:
             pre_dep_unset_amount = float(pre.loc[p_mask & pre[col_ref].isin(diff_pre), col_amount].abs().sum())
 
-    # Bonus çevrimi & kâr (deposit'ten sonra bonus verilmişse)
-    bonus_wager = None
-    bonus_profit = None
-    if bonus_name is not None:
-        idx_bonus = cycle.index[cycle["__reason_type"] == "BONUS_GIVEN"]
-        if len(idx_bonus):
-            b0 = int(idx_bonus[0]) - start_idx
-            sub_b = cycle.iloc[(b0 - (b0 - start_idx)):]  # cycle içinden bonus sonrası
-            pm_b = sub_b["__reason_type"] == "BET_PLACED"
-            sm_b = sub_b["__reason_type"] == "BET_SETTLED"
-            bonus_wager = float(sub_b.loc[pm_b, col_amount].abs().sum())
-            bonus_profit = float(sub_b.loc[sm_b, col_amount].sum() + sub_b.loc[pm_b, col_amount].sum())
-
-    # LATE tespit (missing placed + gap>threshold)
-    late_missing_placed_refs: List[str] = []
-    late_gap_details: List[LateItem] = []
-    late_gap_total = 0.0
-
-    placed_map, settled_map = _pair_placed_settled(cycle, col_ref, col_ts)
-    if col_ref:
-        for rid, s_idxs in settled_map.items():
-            p_idxs = placed_map.get(rid, [])
-            max_pairs = max(len(p_idxs), len(s_idxs))
-            for k in range(max_pairs):
-                p_i = p_idxs[k] if k < len(p_idxs) else None
-                s_i = s_idxs[k] if k < len(s_idxs) else None
-                if p_i is None and s_i is not None:
-                    late_missing_placed_refs.append(rid)
-                elif p_i is not None and s_i is not None:
-                    p_ts = cycle.iloc[p_i][col_ts]
-                    s_ts = cycle.iloc[s_i][col_ts]
-                    if p_ts is not None and s_ts is not None:
-                        gap_min = (s_ts - p_ts).total_seconds() / 60.0
-                        if gap_min > float(threshold_minutes):
-                            late_gap_details.append(LateItem(
-                                reference_id=rid,
-                                placed_ts=_fmt(p_ts),
-                                settled_ts=_fmt(s_ts),
-                                gap_minutes=round(float(gap_min), 2),
-                                reason="gap_over_threshold"
-                            ))
-                            late_gap_total += gap_min
-
-    # Top-3 (pozitif net)
-    top_games: List[TopItem] = []
-    top_providers: List[TopItem] = []
-    if col_game:
-        gp = cycle.groupby(col_game)[col_amount].apply(
+    # Top-3 kârlı oyun/sağlayıcı (net > 0)
+    def net_by(group_col):
+        g = cycle.groupby(group_col)[col_amount].apply(
             lambda s: float(
                 s[cycle.loc[s.index, "__reason_type"] == "BET_SETTLED"].sum() +
                 s[cycle.loc[s.index, "__reason_type"] == "BET_PLACED"].sum()
             )
         )
-        gp = gp[gp > 0].sort_values(ascending=False).head(3)
-        top_games = [TopItem(name=str(k), value=round(float(v), 2)) for k, v in gp.items()]
-    if col_provider:
-        pp = cycle.groupby(col_provider)[col_amount].apply(
-            lambda s: float(
-                s[cycle.loc[s.index, "__reason_type"] == "BET_SETTLED"].sum() +
-                s[cycle.loc[s.index, "__reason_type"] == "BET_PLACED"].sum()
-            )
-        )
-        pp = pp[pp > 0].sort_values(ascending=False).head(3)
-        top_providers = [TopItem(name=str(k), value=round(float(v), 2)) for k, v in pp.items()]
+        g = g[g > 0].sort_values(ascending=False).head(3)
+        return [TopItem(name=str(k), value=round(float(v), 2)) for k, v in g.items()]
 
+    top_games = net_by(col_game) if col_game else []
+    top_providers = net_by(col_provider) if col_provider else []
     currency = (str(cycle[col_currency].iloc[0]) if col_currency and not cycle[col_currency].empty else None)
     member_val = str(dep_row[col_member])
+
+    requirement = float(deposit_amount)
+    remaining = float(max(requirement - total_wager, 0.0))
 
     report = MemberCycleReport(
         member_id=member_val,
@@ -496,26 +549,33 @@ async def compute(
         requirement=round(float(requirement), 2),
         remaining=round(float(remaining), 2),
 
-        unsettled_count=len(unsettled_ids),
-        unsettled_amount=round(float(unsettled_amount), 2),
-        unsettled_reference_ids=unsettled_ids[:50],
+        main_wager=round(main_wager, 2),
+        main_profit=round(main_profit, 2),
+        bonus_wager=round(bonus_wager, 2),
+        bonus_profit=round(bonus_profit, 2),
+        adjustment_wager=round(adjustment_wager, 2),
+        adjustment_profit=round(adjustment_profit, 2),
+
+        open_count=int(open_count),
+        open_amount=round(open_amount, 2),
+        open_list=open_list[:50],
+
+        late_missing_count=int(late_missing_count),
+        late_missing_amount=round(late_missing_amount, 2),
+        late_missing_list=late_missing_list[:50],
+
+        late_gap_count=int(late_gap_count),
+        late_gap_total_gap_minutes=round(float(late_gap_total), 2),
+        late_gap_list=late_gap_list[:50],
 
         global_unsettled_count=int(global_unsettled_count),
         global_unsettled_amount=round(float(global_unsettled_amount), 2),
-
-        late_missing_placed_count=len(late_missing_placed_refs),
-        late_missing_placed_refs=late_missing_placed_refs[:50],
-        late_gap_count=len(late_gap_details),
-        late_gap_total_gap_minutes=round(float(late_gap_total), 2),
-        late_gap_details=late_gap_details[:50],
 
         pre_deposit_unsettled_count=int(pre_dep_unset_count),
         pre_deposit_unsettled_amount=round(float(pre_dep_unset_amount), 2),
 
         bonus_name=bonus_name,
         bonus_amount=(round(float(bonus_amount), 2) if bonus_amount is not None else None),
-        bonus_wager=(round(float(bonus_wager), 2) if bonus_wager is not None else None),
-        bonus_profit=(round(float(bonus_profit), 2) if bonus_profit is not None else None),
 
         top_games=top_games,
         top_providers=top_providers,
