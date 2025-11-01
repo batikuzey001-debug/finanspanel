@@ -1,6 +1,5 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import uploads   # v1
 from app.routers.v2 import router as v2_router
 import os
 
@@ -19,9 +18,7 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
-    return {"status":"ok","service":"finanspanel-api","version":"0.2.0"}
+    return {"status": "ok", "service": "finanspanel-api", "version": "0.2.0"}
 
-# v1
-app.include_router(uploads.router, prefix="/uploads", tags=["uploads"])
-# v2 (YENİ)
+# YALNIZCA v2 endpoint'leri aktif
 app.include_router(v2_router, prefix="/v2", tags=["v2"])
