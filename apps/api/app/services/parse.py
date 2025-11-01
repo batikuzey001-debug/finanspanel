@@ -1,26 +1,25 @@
 from fastapi import HTTPException, UploadFile
 from io import BytesIO
-from typing import Optional, Tuple
+from typing import Optional
 import pandas as pd
 
 def read_df(file: UploadFile) -> tuple[pd.DataFrame, list[str]]:
     name = (file.filename or "").lower()
     content = file.file.read()
 
-    # CSV hızlı yol (pyarrow varsa çok hızlanır)
     if name.endswith(".csv"):
         try:
-            import pyarrow as pa  # noqa: F401
+            import pyarrow as pa  # noqa
             df = pd.read_csv(BytesIO(content), engine="pyarrow")
         except Exception:
             df = pd.read_csv(BytesIO(content))
         sheets = ["csv"]
-    elif name.endswith((".xlsx",".xls",".xlsm")):
+    elif name.endswith((".xlsx", ".xls", ".xlsm")):
         try:
             xls = pd.ExcelFile(BytesIO(content), engine="openpyxl")
             sheet = xls.sheet_names[0] if xls.sheet_names else None
-            if not sheet: raise ValueError("Sheet yok")
-            # yalnız gerekli kolonları okursak hızlanır; ama geniş uyum için full alıyoruz
+            if not sheet:
+                raise ValueError("Sheet yok")
             df = pd.read_excel(xls, sheet_name=sheet)
             sheets = xls.sheet_names
         except Exception as e:
@@ -34,10 +33,12 @@ def read_df(file: UploadFile) -> tuple[pd.DataFrame, list[str]]:
 def col(df, *cands: str) -> Optional[str]:
     low = {c.lower(): c for c in df.columns}
     for cand in cands:
-        if cand.lower() in low: return low[cand.lower()]
+        if cand.lower() in low:
+            return low[cand.lower()]
     for c in df.columns:
         for cand in cands:
-            if c.lower().replace(" ","")==cand.lower().replace(" ",""): return c
+            if c.lower().replace(" ", "") == cand.lower().replace(" ", ""):
+                return c
     return None
 
 def to_dt(series):
@@ -45,14 +46,35 @@ def to_dt(series):
 
 def norm_reason(v: object) -> str:
     s = str(v or "").strip().lower()
-    if s in {"bet_placed","bet placed"} or "placed" in s or "stake" in s: return "BET_PLACED"
-    if s in {"bet_settled","bet settled"} or "settled" in s or "payout" in s or "result" in s: return "BET_SETTLED"
-    if s in {"deposit","yatırım","yatirim"}: return "DEPOSIT"
-    if s in {"bonus_given","bonus given"} or ("bonus" in s and "achiev" not in s): return "BONUS_GIVEN"
-    if s in {"casino_bonus_achieved","casino bonus achieved"} or ("bonus" in s and "achiev" in s): return "BONUS_ACHIEVED"
-    if "withdrawal_decline" in s: return "WITHDRAWAL_DECLINE"
-    if "withdrawal" in s: return "WITHDRAWAL"
-    if "adjust" in s: return "ADJUSTMENT"
+
+    # Standard bets
+    if s in {"bet_placed", "bet placed"} or " bet_placed" in s or " placed" in s or "stake" in s or "wager" in s:
+        return "BET_PLACED"
+    if s in {"bet_settled", "bet settled"} or " settled" in s or "payout" in s or "result" in s:
+        return "BET_SETTLED"
+
+    # Free spins stream → normalize
+    if "free_spins_bet" in s or "free spins bet" in s:
+        return "BET_PLACED"
+    if "free_spins_settled" in s or "free spins settled" in s or "free_spins_winnings" in s or "free spins winnings" in s:
+        return "BET_SETTLED"
+    if "free_spin_given" in s or "free spins given" in s or "free_spin start" in s:
+        return "BONUS_GIVEN"
+
+    # Money movements
+    if s in {"deposit", "yatırım", "yatirim"}:
+        return "DEPOSIT"
+    if "bonus_given" in s or "bonus given" in s:
+        return "BONUS_GIVEN"
+    if "casino_bonus_achieved" in s or "bonus achieved" in s:
+        return "BONUS_ACHIEVED"
+    if "withdrawal_decline" in s:
+        return "WITHDRAWAL_DECLINE"
+    if "withdrawal" in s:
+        return "WITHDRAWAL"
+    if "adjust" in s:
+        return "ADJUSTMENT"
+
     return s.upper()
 
 def payment_str(row, c_payment: Optional[str], c_details: Optional[str]) -> Optional[str]:
