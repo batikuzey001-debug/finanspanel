@@ -1,13 +1,14 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import uploads
+from app.routers import uploads   # v1
+from app.routers.v2 import router as v2_router
 import os
 
-app = FastAPI(title="Finans Panel API", version="0.1.0")
+app = FastAPI(title="Finans Panel API", version="0.2.0")
 
-# CORS
 origins_env = os.getenv("API_CORS_ORIGINS")
-origins = [o.strip() for o in origins_env.split(",")] if origins_env else ["*"]
+origins = origins_env.split(",") if origins_env else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -16,14 +17,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-async def root():
-    return {"ok": True, "service": "finanspanel-api"}
-
 @app.get("/health")
 async def health():
-    # ← Buradaki satır önce eksik tırnak yüzünden patlıyordu
-    return {"status": "ok", "service": "finanspanel-api", "version": "0.1.0"}
+    return {"status":"ok","service":"finanspanel-api","version":"0.2.0"}
 
-# Router en sonda; ağır importlar varsa bile app ayağa kalkar
+# v1
 app.include_router(uploads.router, prefix="/uploads", tags=["uploads"])
+# v2 (YENİ)
+app.include_router(v2_router, prefix="/v2", tags=["v2"])
