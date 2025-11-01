@@ -90,7 +90,10 @@ export default function BriefCard({ data }: { data: Brief }) {
           {r4.items?.length ? (
             <ul style={{ margin: "6px 0 0 16px" }}>
               {r4.items.slice(0, 12).map((it, i) => (
-                <li key={`l-${i}`}>#{it.id || "-"} • P:{it.placed_ts || "-"} → S:{it.settled_ts || "-"} • {it.gap_minutes} dk • {fmt(it.placed_amount ?? 0)} → {fmt(it.settled_amount ?? 0)}</li>
+                <li key={`l-${i}`}>
+                  {/* İstenen sıra: ID – Miktarlar – Süre farkı – Saatler */}
+                  #{it.id || "-"} • {fmt(it.placed_amount ?? 0)} → {fmt(it.settled_amount ?? 0)} • {it.gap_minutes} dk • P:{it.placed_ts || "-"} | S:{it.settled_ts || "-"}
+                </li>
               ))}
             </ul>
           ) : <div style={{ color:"#94a3b8", marginTop: 6 }}>Kayıt yok.</div>}
