@@ -48,9 +48,9 @@ class Row4_Late(BaseModel):
 
 class GameLine(BaseModel):
     game_name: str
-    wager: float
-    profit: float
-    ggr: float  # profit - wager
+    wager: float        # Bahis (toplam çevrim)
+    profit: float       # Kazanç (yalnızca SETTLED toplamı)
+    ggr: float          # GGR = Kazanç - Bahis
 
 class Row5_TopWager(BaseModel):
     items: List[GameLine]
@@ -71,9 +71,14 @@ class BriefResponse(BaseModel):
     row6_top_profit: Row6_TopProfit
     currency: Optional[str] = None
 
+
 # ---------- HELPERS ----------
 def _start_bounds(df: pd.DataFrame, reason_col: str, amt_col: str) -> List[Tuple[int, int]]:
-    starts = df.index[(df[reason_col].isin(["DEPOSIT", "BONUS_GIVEN"])) | ((df[reason_col] == "ADJUSTMENT") & (df[amt_col] > 0))].tolist()
+    """Cycle başlangıcı: DEPOSIT | BONUS_GIVEN (FREE_SPIN_GIVEN normalize) | ADJUSTMENT(>0)."""
+    starts = df.index[
+        (df[reason_col].isin(["DEPOSIT", "BONUS_GIVEN"])) |
+        ((df[reason_col] == "ADJUSTMENT") & (df[amt_col] > 0))
+    ].tolist()
     if not starts:
         return [(0, len(df))]
     bounds: List[Tuple[int, int]] = []
@@ -100,16 +105,18 @@ def _key(df, i, c_ref, c_cid) -> str:
     if vbc and vbc.lower() not in ("nan", "none"): return f"C:{vbc}"
     return f"F:{i}"
 
+
 # ---------- ENDPOINT ----------
 @router.post("", response_model=BriefResponse)
 async def brief(
     file: UploadFile = File(...),
     start_cycle_index: Optional[int] = Form(None),
     end_cycle_index: Optional[int] = Form(None),
-    cycle_index: Optional[int] = Form(None),
+    cycle_index: Optional[int] = Form(None),  # backward compat (tek seçim → start=end)
     member_id: Optional[str] = Form(None),
     threshold_minutes: int = Form(5),
 ):
+    # --- read & normalize ---
     df, _ = read_df(file)
 
     c_ts = col(df, "Date & Time", "Date", "timestamp", "time")
@@ -122,6 +129,7 @@ async def brief(
     c_det = col(df, "Details", "Note")
     c_game = col(df, "Game Name", "Game")
     c_curr = col(df, "Currency", "Base Currency", "System Currency")
+
     for name, c in [("Date & Time", c_ts), ("Player ID", c_mb), ("Reason", c_rs), ("Amount", c_am)]:
         if not c:
             raise HTTPException(status_code=422, detail=f"Eksik kolon: {name}")
@@ -136,11 +144,14 @@ async def brief(
     if len(df) == 0:
         raise HTTPException(status_code=422, detail="Filtre sonrası satır yok.")
 
+    # --- cycle aralığı (BAŞLANGIÇ..BİTİŞ dahil) ---
     bounds = _start_bounds(df, "__r", "_amt")
     total = len(bounds)
 
     if start_cycle_index is None and cycle_index is not None:
         start_cycle_index = cycle_index
+        end_cycle_index = cycle_index if end_cycle_index is None else end_cycle_index
+
     if start_cycle_index is None:
         start_cycle_index = total - 1
     if end_cycle_index is None:
@@ -152,11 +163,11 @@ async def brief(
         raise HTTPException(status_code=400, detail="Geçersiz end_cycle_index")
 
     s_idx = bounds[start_cycle_index][0]
-    e_idx = bounds[end_cycle_index][1]
+    e_idx = bounds[end_cycle_index][1]  # ✅ BAŞLANGIÇ..BİTİŞ aralığı
     cyc = df.iloc[s_idx:e_idx].copy()
     member_val = str(df.iloc[s_idx][c_mb])
 
-    # 1) Son İşlem & Kaynak (order: Tür→Tutar→Tarih→Detay→Bonus Türü)
+    # 1) Son İşlem & Kaynak (Tür → Tutar → Tarih → Kaynak/Detay → Bonus Türü)
     fin_any = cyc["__r"].isin(["DEPOSIT", "BONUS_GIVEN", "ADJUSTMENT"])
     fin_valid = (cyc["__r"].isin(["DEPOSIT", "BONUS_GIVEN"])) | ((cyc["__r"] == "ADJUSTMENT") & (cyc["_amt"] > 0))
     if fin_valid.any():
@@ -167,12 +178,9 @@ async def brief(
         bonus_detail = ((str(r[c_det] or r[c_rs]) if c_det else str(r[c_rs])) if rtype == "BONUS" else None)
         bonus_kind = (_bonus_kind(str(r[c_det] or r[c_rs])) if rtype == "BONUS" else None)
         last_op = Row1_LastOp(
-            type=rtype,
-            ts=_fmt(r[c_ts]),
-            amount=round(float(r["_amt"]), 2),
-            method=method,
-            bonus_detail=(bonus_detail.strip() if isinstance(bonus_detail, str) else None),
-            bonus_kind=bonus_kind,
+            type=rtype, ts=_fmt(r[c_ts]), amount=round(float(r["_amt"]), 2),
+            method=method, bonus_detail=(bonus_detail.strip() if isinstance(bonus_detail, str) else None),
+            bonus_kind=bonus_kind
         )
         win_from = r[c_ts]
         start_for_next = last_i
@@ -181,7 +189,7 @@ async def brief(
         last_op = Row1_LastOp(type="DEPOSIT", ts=_fmt(win_from), amount=0.0, method=None)
         start_for_next = cyc.index[0]
 
-    # 2) Pencere (bitiş = sonraki finansal; yoksa aralığın sonu)
+    # 2) Pencere: başlangıç → sonraki finansal (varsa) yoksa aralık sonu
     if fin_any.any():
         nxt = cyc.index[(cyc.index > start_for_next) & fin_any]
         win_to = cyc.loc[nxt[0], c_ts] if len(nxt) else cyc.iloc[-1][c_ts]
@@ -191,10 +199,14 @@ async def brief(
     in_win = (cyc[c_ts] >= win_from) & (cyc[c_ts] <= win_to)
     placed_win = (cyc["__r"] == "BET_PLACED") & in_win
     wager_total = float(cyc.loc[placed_win, "_amt"].abs().sum())
-    row2 = Row2_Wager(window_from=_fmt(win_from), window_to=_fmt(win_to), wager_total=round(wager_total, 2),
-                      wager_count=int(placed_win.sum()))
+    row2 = Row2_Wager(
+        window_from=_fmt(win_from),
+        window_to=_fmt(win_to),
+        wager_total=round(wager_total, 2),
+        wager_count=int(placed_win.sum()),
+    )
 
-    # 3) Açık
+    # 3) Açık işlemler
     placed_ix = cyc.index[cyc["__r"] == "BET_PLACED"].tolist()
     settled_ix = cyc.index[cyc["__r"] == "BET_SETTLED"].tolist()
     pmap: Dict[str, deque] = defaultdict(deque)
@@ -236,52 +248,52 @@ async def brief(
                     late_total += gap_min
                     late_items.append(LateGapItem(
                         id=(str(cyc.loc[p_i, c_ref]) if c_ref else None),
-                        placed_ts=_fmt(p_ts), settled_ts=_fmt(s_ts),
+                        placed_ts=_fmt(p_ts),
+                        settled_ts=_fmt(s_ts),
                         gap_minutes=round(gap_min, 2),
                         placed_amount=round(float(cyc.loc[p_i, "_amt"]), 2),
                         settled_amount=round(float(cyc.loc[s_i, "_amt"]), 2),
                     ))
     row4 = Row4_Late(late_gap_count=late_count, late_gap_total_minutes=round(late_total, 2), items=late_items[:50])
 
-    # 5) En çok ÇEVRİM (Bahis/Kazanç/GGR)
+    # 5) En çok ÇEVRİM (Bahis/Kazanç/GGR) — Kazanç = yalnızca SETTLED toplamı
     top_wager_items: List[GameLine] = []
     if c_game:
-        placed_by_game = cyc.loc[cyc["__r"] == "BET_PLACED"].groupby(c_game)["_amt"].apply(lambda s: float(s.abs().sum()))
-        profit_by_game = cyc.groupby(c_game)["_amt"].apply(
-            lambda s: float(
-                s[(cyc.loc[s.index, "__r"] == "BET_PLACED")].sum() +
-                s[(cyc.loc[s.index, "__r"] == "BET_SETTLED")].sum()
-            )
-        )
-        if not placed_by_game.empty:
-            order_wager = placed_by_game.sort_values(ascending=False).head(3).index
-            for g in order_wager:
-                w = float(placed_by_game.get(g, 0.0))
-                p = float(profit_by_game.get(g, 0.0))
-                top_wager_items.append(GameLine(game_name=str(g), wager=round(w, 2), profit=round(p, 2), ggr=round(p - w, 2)))
+        wager_by_game = cyc.loc[cyc["__r"] == "BET_PLACED"].groupby(c_game)["_amt"].apply(lambda s: float(s.abs().sum()))
+        revenue_by_game = cyc.loc[cyc["__r"] == "BET_SETTLED"].groupby(c_game)["_amt"].sum() if (cyc["__r"] == "BET_SETTLED").any() else pd.Series(dtype=float)
+        order_wager = (wager_by_game.sort_values(ascending=False).head(3).index) if not wager_by_game.empty else []
+        for g in order_wager:
+            w = float(wager_by_game.get(g, 0.0))
+            rev = float(revenue_by_game.get(g, 0.0))
+            top_wager_items.append(GameLine(game_name=str(g), wager=round(w, 2), profit=round(rev, 2), ggr=round(rev - w, 2)))
     row5 = Row5_TopWager(items=top_wager_items)
 
-    # 6) En çok KÂR (Bahis/Kazanç/GGR)
+    # 6) En çok KÂR (Bahis/Kazanç/GGR) — sıralama GGR’ye göre
     top_profit_items: List[GameLine] = []
     if c_game:
-        profit_by_game2 = cyc.groupby(c_game)["_amt"].apply(
-            lambda s: float(
-                s[(cyc.loc[s.index, "__r"] == "BET_PLACED")].sum() +
-                s[(cyc.loc[s.index, "__r"] == "BET_SETTLED")].sum()
-            )
-        )
-        profit_by_game2 = profit_by_game2[profit_by_game2 > 0].sort_values(ascending=False).head(3)
-        for g, p in profit_by_game2.items():
-            w = float(cyc.loc[(cyc[c_game] == g) & (cyc["__r"] == "BET_PLACED"), "_amt"].abs().sum())
-            top_profit_items.append(GameLine(game_name=str(g), wager=round(w, 2), profit=round(float(p), 2), ggr=round(float(p) - w, 2)))
+        # aynı hesaplamalar
+        wager_by_game2 = cyc.loc[cyc["__r"] == "BET_PLACED"].groupby(c_game)["_amt"].apply(lambda s: float(s.abs().sum()))
+        revenue_by_game2 = cyc.loc[cyc["__r"] == "BET_SETTLED"].groupby(c_game)["_amt"].sum() if (cyc["__r"] == "BET_SETTLED").any() else pd.Series(dtype=float)
+        # GGR haritası
+        ggr_map: Dict[str, float] = {}
+        all_games = set(wager_by_game2.index) | set(revenue_by_game2.index)
+        for g in all_games:
+            w = float(wager_by_game2.get(g, 0.0))
+            rev = float(revenue_by_game2.get(g, 0.0))
+            ggr_map[str(g)] = rev - w
+        # en çok kârlı 3 oyun
+        for g, ggr_val in sorted(ggr_map.items(), key=lambda x: x[1], reverse=True)[:3]:
+            w = float(wager_by_game2.get(g, 0.0))
+            rev = float(revenue_by_game2.get(g, 0.0))
+            top_profit_items.append(GameLine(game_name=str(g), wager=round(w, 2), profit=round(rev, 2), ggr=round(ggr_val, 2)))
     row6 = Row6_TopProfit(items=top_profit_items)
 
     currency = (str(cyc[c_curr].iloc[0]) if c_curr and not cyc[c_curr].empty else None)
     return BriefResponse(
         filename=file.filename,
-        cycle_index_from=int(start_cycle_index if start_cycle_index is not None else 0),
-        cycle_index_to=int(end_cycle_index if end_cycle_index is not None else 0),
-        member_id=str(df.iloc[s_idx][c_mb]),
+        cycle_index_from=int(start_cycle_index),
+        cycle_index_to=int(end_cycle_index),
+        member_id=member_val := str(df.iloc[s_idx][c_mb]),
         row1_last_op=last_op,
         row2_wager=row2,
         row3_open=row3,
