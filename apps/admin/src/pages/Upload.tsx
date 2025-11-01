@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import Dropzone from "../components/Dropzone";
+import BriefCard from "../components/BriefCard";
 
 const API = (import.meta.env.VITE_API_BASE_URL as string) || "http://localhost:8000";
 const tl = new Intl.NumberFormat("tr-TR", { style: "currency", currency: "TRY", maximumFractionDigits: 2 });
@@ -13,25 +14,22 @@ const btn: React.CSSProperties  = { marginTop: 16, padding: "11px 16px", borderR
 type Summary = { filename: string; sheet_names: string[]; first_sheet: string | null; columns: string[]; row_count_sampled: number; row_count_exact?: number; };
 type CycleEntry = { index: number; start_row: number; end_row: number; start_at: string; deposit_amount: number; payment_method?: string | null; label: string; };
 type CyclesResp = { filename: string; total_rows: number; cycles: CycleEntry[] };
-type ProfitRow = { ts: string; source: "MAIN"|"BONUS"|"ADJUSTMENT"|string; amount: number; detail?: string|null };
-type ProfitResp = { filename: string; cycle_index: number; member_id: string; rows: ProfitRow[] };
 
+// v2 çağrıları
 async function uploadFile(file: File) {
   const body = new FormData(); body.append("file", file);
   const r = await fetch(`${API}/uploads`, { method: "POST", body });
   if (!r.ok) throw new Error(await r.text()); return r.json();
 }
 async function listCycles(file: File): Promise<CyclesResp> {
-  // v2 endpoint (yalnız yatırımlar)
   const body = new FormData(); body.append("file", file);
   const r = await fetch(`${API}/v2/cycles`, { method: "POST", body });
   if (!r.ok) throw new Error(await r.text()); return r.json();
 }
-async function profitStream(file: File, cycleIndex?: number): Promise<ProfitResp> {
-  // v2 endpoint (Tarih–Kaynak–Miktar–Detay)
+async function briefAPI(file: File, cycleIndex?: number) {
   const body = new FormData(); body.append("file", file);
   if (typeof cycleIndex === "number") body.append("cycle_index", String(cycleIndex));
-  const r = await fetch(`${API}/v2/profit-stream`, { method: "POST", body });
+  const r = await fetch(`${API}/v2/brief`, { method: "POST", body });
   if (!r.ok) throw new Error(await r.text()); return r.json();
 }
 
@@ -40,17 +38,17 @@ export default function Upload() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [cycles, setCycles] = useState<CycleEntry[] | null>(null);
   const [selectedCycle, setSelectedCycle] = useState<number | null>(null);
-  const [profits, setProfits] = useState<ProfitResp | null>(null);
+  const [brief, setBrief] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const onFile = async (f: File) => {
-    setFile(f); setSummary(null); setCycles(null); setSelectedCycle(null); setProfits(null); setErr(null);
+    setFile(f); setSummary(null); setCycles(null); setSelectedCycle(null); setBrief(null); setErr(null);
     setLoading(true);
     try {
       const s = await uploadFile(f); setSummary(s);
       const cy = await listCycles(f); setCycles(cy.cycles || []);
-      if (cy.cycles?.length) setSelectedCycle(cy.cycles[cy.cycles.length-1].index); // en yeni yatırım
+      if (cy.cycles?.length) setSelectedCycle(cy.cycles[cy.cycles.length-1].index);
     } catch (e: any) {
       setErr(e?.message || "Yükleme/Cycle hatası");
     } finally { setLoading(false); }
@@ -58,10 +56,10 @@ export default function Upload() {
 
   const onCompute = async () => {
     if (!file) return;
-    setLoading(true); setErr(null); setProfits(null);
+    setLoading(true); setErr(null); setBrief(null);
     try {
-      const p = await profitStream(file, selectedCycle ?? undefined);
-      setProfits(p);
+      const b = await briefAPI(file, selectedCycle ?? undefined);
+      setBrief(b);
     } catch (e: any) {
       setErr(e?.message || "Hesaplama hatası");
     } finally { setLoading(false); }
@@ -101,34 +99,10 @@ export default function Upload() {
         )}
       </div>
 
-      {/* Kazanç Akışı (Tarih – Kaynak – Miktar – Detay) */}
-      {profits && (
+      {/* Brief kartı */}
+      {brief && (
         <div style={{ marginTop: 16 }}>
-          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
-            <div style={{ fontWeight:800, fontSize:16 }}>Kazanç Akışı</div>
-            <div style={{ fontSize:12, color:"#94a3b8" }}>{profits.filename} • Cycle #{profits.cycle_index} • Üye: {profits.member_id}</div>
-          </div>
-
-          <div style={{ border:"1px solid #1f2937", borderRadius:12, overflow:"hidden" }}>
-            {/* Header */}
-            <div style={{ display:"grid", gridTemplateColumns:"220px 200px 1fr 1fr", background:"#0f1520", padding:"10px 12px", fontSize:12, color:"#94a3b8" }}>
-              <div>Tarih</div>
-              <div>Kaynak</div>
-              <div>Miktar</div>
-              <div>Detay (Bonus/Depozito)</div>
-            </div>
-            {/* Rows */}
-            {profits.rows.length ? profits.rows.map((r,idx)=>(
-              <div key={idx} style={{ display:"grid", gridTemplateColumns:"220px 200px 1fr 1fr", padding:"10px 12px", borderTop:"1px solid #1f2937" }}>
-                <div>{r.ts}</div>
-                <div>{r.source==="MAIN" ? "Ana Para" : r.source==="BONUS" ? "Bonus" : r.source==="ADJUSTMENT" ? "Adjustment" : r.source}</div>
-                <div style={{ color: (r.amount ?? 0) >= 0 ? "#34d399" : "#f87171", fontWeight:700 }}>{fmt(r.amount)}</div>
-                <div style={{ whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{r.detail || "-"}</div>
-              </div>
-            )) : (
-              <div style={{ padding:"12px", color:"#94a3b8" }}>Kayıt yok.</div>
-            )}
-          </div>
+          <BriefCard data={brief} />
         </div>
       )}
     </div>
