@@ -85,7 +85,7 @@ export default function BriefCard({ data }: { data: Brief }) {
       {/* 4) Gecikmeli Sonuçlanan (>5dk) */}
       <div style={row}>
         <div style={box}>
-          <div style={cap}>4) Gecikmeli Sonuçlanan İşlemler (>5dk)</div>
+          <div style={cap}>{`4) Gecikmeli Sonuçlanan İşlemler (> 5dk)`}</div>
           <div><b>Toplam</b> {r4.late_gap_count} adet • {Math.round(r4.late_gap_total_minutes)} dk</div>
           {r4.items?.length ? (
             <ul style={{ margin: "6px 0 0 16px" }}>
