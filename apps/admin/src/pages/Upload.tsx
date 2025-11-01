@@ -22,14 +22,16 @@ async function uploadFile(file: File) {
   if (!r.ok) throw new Error(await r.text()); return r.json();
 }
 async function listCycles(file: File): Promise<CyclesResp> {
+  // v2 endpoint (yalnız yatırımlar)
   const body = new FormData(); body.append("file", file);
-  const r = await fetch(`${API}/uploads/cycles`, { method: "POST", body });
+  const r = await fetch(`${API}/v2/cycles`, { method: "POST", body });
   if (!r.ok) throw new Error(await r.text()); return r.json();
 }
 async function profitStream(file: File, cycleIndex?: number): Promise<ProfitResp> {
+  // v2 endpoint (Tarih–Kaynak–Miktar–Detay)
   const body = new FormData(); body.append("file", file);
   if (typeof cycleIndex === "number") body.append("cycle_index", String(cycleIndex));
-  const r = await fetch(`${API}/uploads/profit-stream`, { method: "POST", body });
+  const r = await fetch(`${API}/v2/profit-stream`, { method: "POST", body });
   if (!r.ok) throw new Error(await r.text()); return r.json();
 }
 
