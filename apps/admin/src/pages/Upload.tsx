@@ -1,177 +1,95 @@
 import React, { useState } from "react";
 import Dropzone from "../components/Dropzone";
 
+const API = (import.meta.env.VITE_API_BASE_URL as string) || "http://localhost:8000";
 const tl = new Intl.NumberFormat("tr-TR", { style: "currency", currency: "TRY", maximumFractionDigits: 2 });
 const fmt = (n?: number | null) => (typeof n === "number" ? tl.format(n) : "-");
 
 const card: React.CSSProperties = { border: "1px solid #1f2937", borderRadius: 16, padding: 14, marginBottom: 14, background: "#151a23", boxShadow: "0 1px 8px rgba(0,0,0,0.25)" };
 const box: React.CSSProperties  = { padding: 12, border: "1px solid #1f2937", borderRadius: 12, background: "#0f1520" };
 const cap: React.CSSProperties  = { fontSize: 12, color: "#94a3b8", marginBottom: 4 };
-const btnPrimary: React.CSSProperties = { marginTop: 16, padding: "11px 16px", borderRadius: 12, border: "1px solid #1f2937", cursor: "pointer", background: "linear-gradient(135deg, #0ea5e9, #6366f1)", color: "#fff", fontWeight: 700, letterSpacing: 0.3 };
-const tiny: React.CSSProperties = { fontSize: 12, color: "#94a3b8" };
-const selectStyle: React.CSSProperties = { width: "100%", padding: "10px 12px", borderRadius: 12, border: "1px solid #1f2937", background: "#0f1520", color: "#e5e7eb" };
+const btn: React.CSSProperties  = { marginTop: 16, padding: "11px 16px", borderRadius: 12, border: "1px solid #1f2937", cursor: "pointer", background: "linear-gradient(135deg, #0ea5e9, #6366f1)", color: "#fff", fontWeight: 700 };
 
-const API = (import.meta.env.VITE_API_BASE_URL as string) || "http://localhost:8000";
-
-/* --- Tipler --- */
 type Summary = { filename: string; sheet_names: string[]; first_sheet: string | null; columns: string[]; row_count_sampled: number; row_count_exact?: number; };
-
-type TopItem = { name: string; value: number };
-type BetItem = { reference_id?: string | null; placed_ts?: string | null; settled_ts?: string | null; gap_minutes?: number | null; placed_amount?: number | null; settled_amount?: number | null; };
-
-type Report = {
-  member_id: string;
-  cycle_index?: number;
-  cycle_start_at?: string | null;
-  cycle_end_at?: string | null;
-  last_operation_type: string;
-  last_operation_ts: string | null;
-  last_deposit_amount?: number | null;
-  last_payment_method?: string | null;
-
-  sum_adjustment: number;
-  sum_withdrawal_approved: number;
-  sum_withdrawal_declined: number;
-  bonus_to_main_amount: number;
-
-  total_wager: number;
-  total_profit: number;
-  requirement: number;
-  remaining: number;
-
-  main_wager: number;
-  main_profit: number;
-  bonus_wager: number;
-  bonus_profit: number;
-  adjustment_wager: number;
-  adjustment_profit: number;
-
-  open_count: number;
-  open_amount: number;
-  open_list: BetItem[];
-
-  late_missing_count: number;
-  late_missing_amount: number;
-  late_missing_list: BetItem[];
-
-  late_gap_count: number;
-  late_gap_total_gap_minutes: number;
-  late_gap_list: BetItem[];
-
-  global_unsettled_count: number;
-  global_unsettled_amount: number;
-
-  pre_deposit_unsettled_count: number;
-  pre_deposit_unsettled_amount: number;
-
-  bonus_name?: string | null;
-  bonus_amount?: number | null;
-
-  top_games: TopItem[];
-  top_providers: TopItem[];
-  currency?: string | null;
-};
-
-type ComputeResp = { filename: string; total_rows: number; reports: Report[]; };
 type CycleEntry = { index: number; start_row: number; end_row: number; start_at: string; deposit_amount: number; payment_method?: string | null; label: string; };
 type CyclesResp = { filename: string; total_rows: number; cycles: CycleEntry[] };
+type ProfitRow = { ts: string; source: "MAIN"|"BONUS"|"ADJUSTMENT"|string; amount: number; detail?: string|null };
+type ProfitResp = { filename: string; cycle_index: number; member_id: string; rows: ProfitRow[] };
 
-/* --- API yardımcıları --- */
 async function uploadFile(file: File) {
-  const body = new FormData();
-  body.append("file", file);
+  const body = new FormData(); body.append("file", file);
   const r = await fetch(`${API}/uploads`, { method: "POST", body });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+  if (!r.ok) throw new Error(await r.text()); return r.json();
 }
 async function listCycles(file: File): Promise<CyclesResp> {
-  const body = new FormData();
-  body.append("file", file);
+  const body = new FormData(); body.append("file", file);
   const r = await fetch(`${API}/uploads/cycles`, { method: "POST", body });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+  if (!r.ok) throw new Error(await r.text()); return r.json();
 }
-async function computeCycle(file: File, cycleIndex?: number, thresholdMinutes = 5): Promise<ComputeResp> {
-  const body = new FormData();
-  body.append("file", file);
+async function profitStream(file: File, cycleIndex?: number): Promise<ProfitResp> {
+  const body = new FormData(); body.append("file", file);
   if (typeof cycleIndex === "number") body.append("cycle_index", String(cycleIndex));
-  body.append("threshold_minutes", String(thresholdMinutes));
-  const r = await fetch(`${API}/uploads/compute`, { method: "POST", body });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+  const r = await fetch(`${API}/uploads/profit-stream`, { method: "POST", body });
+  if (!r.ok) throw new Error(await r.text()); return r.json();
 }
 
-/* --- Bileşen --- */
 export default function Upload() {
   const [file, setFile] = useState<File | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [cycles, setCycles] = useState<CycleEntry[] | null>(null);
   const [selectedCycle, setSelectedCycle] = useState<number | null>(null);
-  const [res, setRes] = useState<ComputeResp | null>(null);
+  const [profits, setProfits] = useState<ProfitResp | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const onFile = async (f: File) => {
-    setFile(f); setSummary(null); setCycles(null); setSelectedCycle(null); setRes(null); setErr(null);
+    setFile(f); setSummary(null); setCycles(null); setSelectedCycle(null); setProfits(null); setErr(null);
     setLoading(true);
     try {
       const s = await uploadFile(f); setSummary(s);
       const cy = await listCycles(f); setCycles(cy.cycles || []);
-      if (cy.cycles?.length) setSelectedCycle(cy.cycles[cy.cycles.length - 1].index); // en yeni yatırım
+      if (cy.cycles?.length) setSelectedCycle(cy.cycles[cy.cycles.length-1].index); // en yeni yatırım
     } catch (e: any) {
       setErr(e?.message || "Yükleme/Cycle hatası");
-    } finally {
-      setLoading(false);
-    }
+    } finally { setLoading(false); }
   };
 
   const onCompute = async () => {
     if (!file) return;
-    setLoading(true); setErr(null); setRes(null);
+    setLoading(true); setErr(null); setProfits(null);
     try {
-      const r = await computeCycle(file, selectedCycle ?? undefined);
-      setRes(r);
+      const p = await profitStream(file, selectedCycle ?? undefined);
+      setProfits(p);
     } catch (e: any) {
       setErr(e?.message || "Hesaplama hatası");
-    } finally {
-      setLoading(false);
-    }
+    } finally { setLoading(false); }
   };
 
   return (
     <div>
-      {/* Üst grid — Yükleme & Özet / Cycle seçimi */}
+      {/* Üst grid: Yükleme + Cycle seçimi */}
       <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 16 }}>
         <div style={card}>
           <Dropzone onFile={onFile} />
-
-          {cycles && cycles.length > 0 && (
+          {cycles && cycles.length>0 && (
             <div style={{ marginTop: 12 }}>
               <div style={{ ...cap, marginBottom: 6 }}>Cycle Seç (Yalnızca Yatırımlar)</div>
               <select
-                style={selectStyle}
                 value={selectedCycle ?? ""}
-                onChange={(e) => setSelectedCycle(e.target.value === "" ? null : Number(e.target.value))}
+                onChange={(e)=>setSelectedCycle(e.target.value===""?null:Number(e.target.value))}
+                style={{ width:"100%", padding:"10px 12px", borderRadius:12, border:"1px solid #1f2937", background:"#0f1520", color:"#e5e7eb" }}
               >
-                {cycles.map((c) => (
-                  <option key={c.index} value={c.index}>
-                    {c.label}
-                  </option>
-                ))}
+                {cycles.map(c => <option key={c.index} value={c.index}>{c.label}</option>)}
               </select>
             </div>
           )}
-
-          <button onClick={onCompute} style={btnPrimary} disabled={!file || loading}>
-            {loading ? "İşleniyor…" : "Hesapla"}
-          </button>
-
+          <button onClick={onCompute} style={btn} disabled={!file || loading}>{loading ? "İşleniyor…" : "Hesapla"}</button>
           {err && <p style={{ marginTop: 10, color: "#ef4444" }}>{err}</p>}
         </div>
 
         {summary && (
           <div style={card}>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 12 }}>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:12 }}>
               <div style={box}><div style={cap}>Dosya</div><div>{summary.filename}</div></div>
               <div style={box}><div style={cap}>Sheet</div><div>{summary.first_sheet} ({summary.sheet_names.length})</div></div>
               <div style={box}><div style={cap}>Kolon</div><div>{summary.columns.length}</div></div>
@@ -181,116 +99,34 @@ export default function Upload() {
         )}
       </div>
 
-      {/* Sonuç Kartı */}
-      {res && (
+      {/* Kazanç Akışı (Tarih – Kaynak – Miktar – Detay) */}
+      {profits && (
         <div style={{ marginTop: 16 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-            <div style={{ fontWeight: 800, fontSize: 16 }}>Sonuçlar</div>
-            <div style={tiny}>{res.filename} • {res.total_rows} satır</div>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+            <div style={{ fontWeight:800, fontSize:16 }}>Kazanç Akışı</div>
+            <div style={{ fontSize:12, color:"#94a3b8" }}>{profits.filename} • Cycle #{profits.cycle_index} • Üye: {profits.member_id}</div>
           </div>
 
-          {res.reports.map((r) => (
-            <div key={`${r.member_id}-${r.cycle_index ?? "c"}`} style={card}>
-              {/* Başlık */}
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                <div style={{ fontWeight: 800, fontSize: 16 }}>
-                  Üye: {r.member_id}
-                  {typeof r.cycle_index === "number" && (
-                    <span style={{ marginLeft: 8, fontSize: 12, color: "#94a3b8" }}>
-                      • Cycle # {r.cycle_index} {r.cycle_start_at ? `(${r.cycle_start_at} → ${r.cycle_end_at || "…"})` : ""}
-                    </span>
-                  )}
-                </div>
-                <div style={tiny}>{r.last_operation_type}{r.last_operation_ts ? ` • ${r.last_operation_ts}` : ""}</div>
-              </div>
-
-              {/* 1) Kaynağa göre özet (Ana Para / Bonus / Adjustment) */}
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12 }}>
-                <div style={box}>
-                  <div style={cap}>Ana Para</div>
-                  <div>Çevrim: {fmt(r.main_wager)} • Kâr: <b style={{ color: r.main_profit >= 0 ? "#34d399" : "#f87171" }}>{fmt(r.main_profit)}</b></div>
-                </div>
-                <div style={box}>
-                  <div style={cap}>Bonus {r.bonus_name ? `(${r.bonus_name})` : ""}</div>
-                  <div>Çevrim: {fmt(r.bonus_wager)} • Kâr: <b style={{ color: r.bonus_profit >= 0 ? "#34d399" : "#f87171" }}>{fmt(r.bonus_profit)}</b></div>
-                </div>
-                <div style={box}>
-                  <div style={cap}>Adjustment</div>
-                  <div>Çevrim: {fmt(r.adjustment_wager)} • Kâr: <b style={{ color: r.adjustment_profit >= 0 ? "#34d399" : "#f87171" }}>{fmt(r.adjustment_profit)}</b></div>
-                </div>
-              </div>
-
-              {/* 2) Genel toplamlar */}
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12, marginTop: 8 }}>
-                <div style={box}><div style={cap}>Toplam Çevrim</div><div>{fmt(r.total_wager)}</div></div>
-                <div style={box}><div style={cap}>Gereksinim (1x)</div><div>{fmt(r.requirement)}</div></div>
-                <div style={box}><div style={cap}>Kalan</div><div>{fmt(r.remaining)}</div></div>
-                <div style={box}><div style={cap}>Toplam Kâr</div><div style={{ color: r.total_profit >= 0 ? "#34d399" : "#f87171", fontWeight: 800 }}>{fmt(r.total_profit)}</div></div>
-              </div>
-
-              {/* 3) Açık & Geç sonuçlanan — TUTAR + TARİH + ID */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginTop: 8 }}>
-                <div style={box}>
-                  <div style={cap}>Açık Bahis (PLACED var, SETTLED yok)</div>
-                  <div>{r.open_count} adet • {fmt(r.open_amount)}</div>
-                  {r.open_list?.length ? (
-                    <ul style={{ margin: "6px 0 0 16px" }}>
-                      {r.open_list.slice(0, 8).map((b, i) => (
-                        <li key={`o-${i}`}>#{b.reference_id || "-"} • {b.placed_ts} • {fmt(b.placed_amount)}</li>
-                      ))}
-                    </ul>
-                  ) : null}
-                </div>
-
-                <div style={box}>
-                  <div style={cap}>Geç — Eksik PLACED (SETTLED var)</div>
-                  <div>{r.late_missing_count} adet • {fmt(r.late_missing_amount)}</div>
-                  {r.late_missing_list?.length ? (
-                    <ul style={{ margin: "6px 0 0 16px" }}>
-                      {r.late_missing_list.slice(0, 8).map((b, i) => (
-                        <li key={`m-${i}`}>#{b.reference_id || "-"} • S: {b.settled_ts} • {fmt(b.settled_amount)}</li>
-                      ))}
-                    </ul>
-                  ) : null}
-                </div>
-
-                <div style={box}>
-                  <div style={cap}>{`Geç — Süre > 5dk (eşlenenler)`}</div>
-                  <div>{r.late_gap_count} adet • Toplam {r.late_gap_total_gap_minutes} dk</div>
-                  {r.late_gap_list?.length ? (
-                    <ul style={{ margin: "6px 0 0 16px" }}>
-                      {r.late_gap_list.slice(0, 8).map((b, i) => (
-                        <li key={`g-${i}`}>#{b.reference_id || "-"} • P: {b.placed_ts} • S: {b.settled_ts} • {b.gap_minutes} dk • {fmt(b.placed_amount)} → {fmt(b.settled_amount)}</li>
-                      ))}
-                    </ul>
-                  ) : null}
-                </div>
-              </div>
-
-              {/* 4) Top-3 Kârlı Oyun / Sağlayıcı */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 8 }}>
-                <div style={box}>
-                  <div style={cap}>En Kârlı 3 Oyun</div>
-                  <ul style={{ margin: "6px 0 0 16px" }}>
-                    {r.top_games.length ? r.top_games.map((g) => <li key={g.name}>{g.name}: {fmt(g.value)}</li>) : <li>-</li>}
-                  </ul>
-                </div>
-                <div style={box}>
-                  <div style={cap}>En Kârlı 3 Sağlayıcı</div>
-                  <ul style={{ margin: "6px 0 0 16px" }}>
-                    {r.top_providers.length ? r.top_providers.map((p) => <li key={p.name}>{p.name}: {fmt(p.value)}</li>) : <li>-</li>}
-                  </ul>
-                </div>
-              </div>
-
-              {/* 5) Bilgi şeridi */}
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginTop: 8 }}>
-                <div style={box}><div style={cap}>Withdrawal (Onaylı)</div><div>{fmt(r.sum_withdrawal_approved)}</div></div>
-                <div style={box}><div style={cap}>Withdrawal (İptal)</div><div>{fmt(r.sum_withdrawal_declined)}</div></div>
-                <div style={box}><div style={cap}>Bonus → Ana Para</div><div>{fmt(r.bonus_to_main_amount)}</div></div>
-              </div>
+          <div style={{ border:"1px solid #1f2937", borderRadius:12, overflow:"hidden" }}>
+            {/* Header */}
+            <div style={{ display:"grid", gridTemplateColumns:"220px 200px 1fr 1fr", background:"#0f1520", padding:"10px 12px", fontSize:12, color:"#94a3b8" }}>
+              <div>Tarih</div>
+              <div>Kaynak</div>
+              <div>Miktar</div>
+              <div>Detay (Bonus/Depozito)</div>
             </div>
-          ))}
+            {/* Rows */}
+            {profits.rows.length ? profits.rows.map((r,idx)=>(
+              <div key={idx} style={{ display:"grid", gridTemplateColumns:"220px 200px 1fr 1fr", padding:"10px 12px", borderTop:"1px solid #1f2937" }}>
+                <div>{r.ts}</div>
+                <div>{r.source==="MAIN" ? "Ana Para" : r.source==="BONUS" ? "Bonus" : r.source==="ADJUSTMENT" ? "Adjustment" : r.source}</div>
+                <div style={{ color: (r.amount ?? 0) >= 0 ? "#34d399" : "#f87171", fontWeight:700 }}>{fmt(r.amount)}</div>
+                <div style={{ whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{r.detail || "-"}</div>
+              </div>
+            )) : (
+              <div style={{ padding:"12px", color:"#94a3b8" }}>Kayıt yok.</div>
+            )}
+          </div>
         </div>
       )}
     </div>
