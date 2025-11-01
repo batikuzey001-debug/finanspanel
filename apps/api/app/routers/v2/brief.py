@@ -105,10 +105,10 @@ def _fmt(ts) -> str:
 @router.post("", response_model=BriefResponse)
 async def brief(
     file: UploadFile = File(...),
-    # yeni parametreler: cycle aralığı
+    # cycle aralığı
     start_cycle_index: Optional[int] = Form(None),
     end_cycle_index:   Optional[int] = Form(None),
-    # geriye uyumluluk için eski isim
+    # geriye uyum
     cycle_index:       Optional[int] = Form(None),
     member_id:         Optional[str] = Form(None),
     threshold_minutes: int = Form(5),
@@ -185,13 +185,17 @@ async def brief(
         last_fin_idx = cyc.index[fin_valid_mask][-1]
         row = cyc.loc[last_fin_idx]
         rtype = "BONUS" if row["__r"] == "BONUS_GIVEN" else row["__r"]
+        method_val = payment_str(row, c_pay, c_det) if rtype in ("DEPOSIT", "ADJUSTMENT") else None  # <-- WALRUS YOK
+        bonus_detail_val = ((str(row[c_det] or row[c_rs]) if c_det else str(row[c_rs])) if rtype == "BONUS" else None)
+        bonus_kind_val = (_bonus_kind_from_text(str(row[c_det] or row[c_rs])) if rtype == "BONUS" else None)
+
         last_op = Row1_LastOp(
             type=rtype,
             ts=_fmt(row[c_ts]),
             amount=round(float(row["_amt"]), 2),
-            method=payment_sql := (payment_str(row, c_pay, c_det) if rtype in ("DEPOSIT", "ADJUSTMENT") else None),
-            bonus_detail=((str(row[c_det] or row[c_rs]) if c_det else str(row[c_rs])) if rtype == "BONUS" else None),
-            bonus_kind=(_bonus_kind_from_text(str(row[c_det] or row[c_rs])) if rtype == "BONUS" else None),
+            method=method_val,
+            bonus_detail=(bonus_detail_val.strip() if isinstance(bonus_detail_val, str) else None),
+            bonus_kind=bonus_kind_val,
         )
         window_from_ts = row[c_ts]
         start_idx_for_next = last_fin_idx
