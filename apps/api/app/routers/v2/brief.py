@@ -185,7 +185,7 @@ async def brief(
         last_fin_idx = cyc.index[fin_valid_mask][-1]
         row = cyc.loc[last_fin_idx]
         rtype = "BONUS" if row["__r"] == "BONUS_GIVEN" else row["__r"]
-        method_val = payment_str(row, c_pay, c_det) if rtype in ("DEPOSIT", "ADJUSTMENT") else None  # <-- WALRUS YOK
+        method_val = payment_str(row, c_pay, c_det) if rtype in ("DEPOSIT", "ADJUSTMENT") else None
         bonus_detail_val = ((str(row[c_det] or row[c_rs]) if c_det else str(row[c_rs])) if rtype == "BONUS" else None)
         bonus_kind_val = (_bonus_kind_from_text(str(row[c_det] or row[c_rs])) if rtype == "BONUS" else None)
 
@@ -321,11 +321,14 @@ async def brief(
 
     currency = (str(cyc[c_curr].iloc[0]) if c_curr and not cyc[c_curr].empty else None)
 
+    # WALRUS YOK — önce ata, sonra kullan
+    member_val = str(df.iloc[s_idx][c_mb])
+
     return BriefResponse(
         filename=file.filename,
         cycle_index_from=int(start_cycle_index),
         cycle_index_to=int(end_cycle_index),
-        member_id=member_val := str(df.iloc[s_idx][c_mb]),
+        member_id=member_val,
         row1_last_op=last_op,
         row2_wager=row2,
         row3_open=row3,
