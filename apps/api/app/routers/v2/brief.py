@@ -113,6 +113,7 @@ async def brief(
     """
     import pandas as pd  # type: ignore
     import numpy as np   # type: ignore
+    from collections import defaultdict, deque
 
     df, _ = read_df(file)
 
@@ -135,89 +136,88 @@ async def brief(
     df[c_ts] = to_dt(df[c_ts])
     df = df.sort_values(c_ts).reset_index(drop=True)
     df["__r"] = df[c_rs].apply(norm_reason)
+    df["_amt"] = pd.to_numeric(df[c_am], errors="coerce").fillna(0.0)
+
     if member_id:
         df = df[df[c_mb].astype(str) == str(member_id)].reset_index(drop=True)
     if len(df) == 0:
         raise HTTPException(status_code=422, detail="Filtre sonrası satır yok.")
 
-    # Cycle: yalnız yatırımlar
+    # Cycle: önce DEPOSIT'e göre, yoksa tüm dosya tek cycle
     bounds = _bounds_deposits(df, "__r")
-    if not bounds:
-        raise HTTPException(status_code=422, detail="Bu dosyada DEPOSIT yok.")
-    if cycle_index is None:
-        cycle_index = len(bounds) - 1
-    if not (0 <= cycle_index < len(bounds)):
-        raise HTTPException(status_code=400, detail=f"Geçersiz cycle_index: {cycle_index}")
-    s_idx, e_idx = bounds[cycle_index]
+    if bounds:
+        if cycle_index is None:
+            cycle_index = len(bounds) - 1
+        if not (0 <= cycle_index < len(bounds)):
+            raise HTTPException(status_code=400, detail=f"Geçersiz cycle_index: {cycle_index}")
+        s_idx, e_idx = bounds[cycle_index]
+    else:
+        s_idx, e_idx = 0, len(df)
+        cycle_index = 0  # fallback cycle
+
     cyc = df.iloc[s_idx:e_idx].copy()
+    member_val = str(df.iloc[s_idx][c_mb])
 
     # ---- 1) Son işlem (NEGATİF ADJUSTMENT HARİÇ) ----
-    cyc["_amt"] = pd.to_numeric(cyc[c_am], errors="coerce").fillna(0.0)
-
-    fin_any_mask = cyc["__r"].isin(["DEPOSIT", "BONUS_GIVEN", "ADJUSTMENT"])  # tüm finansaller (pencere bitişi için)
+    fin_any_mask   = cyc["__r"].isin(["DEPOSIT", "BONUS_GIVEN", "ADJUSTMENT"])  # pencere bitişi için
     fin_valid_mask = (cyc["__r"].isin(["DEPOSIT", "BONUS_GIVEN"])) | ((cyc["__r"] == "ADJUSTMENT") & (cyc["_amt"] > 0))
-    # son geçerli finansal
-    if not fin_valid_mask.any():
-        # cycle içinde sadece negatif/0 adjustment olabilir; fallback: cycle başlangıcı
-        last_op = Row1_LastOp(type="DEPOSIT", ts=_fmt(cyc.iloc[0][c_ts]), amount=0.0, method=None)
-        window_from_ts = cyc.iloc[0][c_ts]
-    else:
+
+    if fin_valid_mask.any():
         last_fin_idx = cyc.index[fin_valid_mask][-1]
         row = cyc.loc[last_fin_idx]
         rtype = "BONUS" if row["__r"] == "BONUS_GIVEN" else row["__r"]
-        amt = float(row["_amt"])
-        ts = row[c_ts]
-        method = payment_str(row, c_pay, c_det) if rtype in ("DEPOSIT", "ADJUSTMENT") else None
-        bonus_detail = (str(row[c_det] or row[c_rs]) if c_det else str(row[c_rs])) if rtype == "BONUS" else None
-        bonus_kind = _bonus_kind_from_text(bonus_detail or "") if rtype == "BONUS" else None
-
         last_op = Row1_LastOp(
             type=rtype,
-            ts=_fmt(ts),
-            amount=round(amt, 2),
-            method=method,
-            bonus_detail=(bonus_detail.strip() if isinstance(bonus_detail, str) else None),
-            bonus_kind=bonus_kind,
+            ts=_fmt(row[c_ts]),
+            amount=round(float(row["_amt"]), 2),
+            method=payment_str(row, c_pay, c_det) if rtype in ("DEPOSIT", "ADJUSTMENT") else None,
+            bonus_detail=((str(row[c_det] or row[c_rs]) if c_det else str(row[c_rs])) if rtype == "BONUS" else None),
+            bonus_kind=(_bonus_kind_from_text(str(row[c_det] or row[c_rs])) if rtype == "BONUS" else None),
         )
-        window_from_ts = ts
-
-    # Pencere bitişi: bir sonraki FİNANSAL (pozitif/negatif fark etmez)
-    next_fin = cyc.index[(cyc.index > cyc.index[fin_any_mask][-1]) & fin_any_mask] if fin_any_mask.any() else []
-    # Doğru şekilde: last_op'un indexinden sonra gelen ilk finansal
-    if fin_any_mask.any():
-        # last_op'un indexini bul
-        # window_from_ts ile en yakın eşit satırı seçelim (aynı ts birden fazla olabilir)
-        start_candidates = cyc.index[cyc[c_ts] == window_from_ts]
-        start_idx = int(start_candidates[-1]) if len(start_candidates) else int(cyc.index[0])
-        next_any = cyc.index[(cyc.index > start_idx) & fin_any_mask]
-        window_to_ts = cyc.loc[next_any[0], c_ts] if len(next_any) else (cyc.iloc[-1][c_ts] if len(cyc) else None)
+        window_from_ts = row[c_ts]
+        start_idx_for_next = last_fin_idx
     else:
-        window_to_ts = cyc.iloc[-1][c_ts] if len(cyc) else None
+        # hiç geçerli finansal yok → cycle başını esas al
+        first_ts = cyc.iloc[0][c_ts]
+        last_op = Row1_LastOp(type="DEPOSIT", ts=_fmt(first_ts), amount=0.0, method=None)
+        window_from_ts = first_ts
+        start_idx_for_next = cyc.index[0]
+
+    # Pencere bitişi: start_idx_for_next'ten sonra gelen İLK finansal (pozitif/negatif ayrımı yok); yoksa cycle sonu
+    if fin_any_mask.any():
+        next_any = cyc.index[(cyc.index > start_idx_for_next) & fin_any_mask]
+        window_to_ts = cyc.loc[next_any[0], c_ts] if len(next_any) else cyc.iloc[-1][c_ts]
+    else:
+        window_to_ts = cyc.iloc[ -1 ][c_ts]
 
     # ---- 2) Penceredeki wager toplamı ----
     in_window = (cyc[c_ts] >= window_from_ts) & (cyc[c_ts] <= (window_to_ts if window_to_ts is not None else cyc.iloc[-1][c_ts]))
     placed_win = (cyc["__r"] == "BET_PLACED") & in_window
     wager_total = float(cyc.loc[placed_win, "_amt"].abs().sum())
     wager_count = int(placed_win.sum())
-    row2 = Row2_Wager(window_from=_fmt(window_from_ts), window_to=_fmt(window_to_ts) if window_to_ts is not None else None,
-                      wager_total=round(wager_total, 2), wager_count=wager_count)
+    row2 = Row2_Wager(
+        window_from=_fmt(window_from_ts),
+        window_to=_fmt(window_to_ts) if window_to_ts is not None else None,
+        wager_total=round(wager_total, 2),
+        wager_count=wager_count,
+    )
 
     # ---- 3) Açık işlemler ----
-    from collections import defaultdict, deque
-    placed_ix = cyc.index[cyc["__r"] == "BET_PLACED"].tolist()
+    placed_ix  = cyc.index[cyc["__r"] == "BET_PLACED"].tolist()
     settled_ix = cyc.index[cyc["__r"] == "BET_SETTLED"].tolist()
     pmap: Dict[str, deque] = defaultdict(deque)
     smap: Dict[str, deque] = defaultdict(deque)
     for i in placed_ix:  pmap[_key_for_row(cyc, i, c_ref, c_cid)].append(i)
     for i in settled_ix: smap[_key_for_row(cyc, i, c_ref, c_cid)].append(i)
     # eşleşenleri düş
-    for key in list(set(pmap) | set(smap)):
+    for key in set(pmap) | set(smap):
         ps, ss = pmap.get(key, deque()), smap.get(key, deque())
         while ps and ss:
             ps.popleft(); ss.popleft()
+
     open_items: List[OpenItem] = []
     open_total = 0.0
-    for key, q in pmap.items():
+    for _, q in pmap.items():
         for idx_p in q:
             amt = float(cyc.loc[idx_p, "_amt"])
             open_total += abs(amt)
@@ -229,7 +229,6 @@ async def brief(
     row3 = Row3_Open(open_total_amount=round(open_total, 2), open_count=len(open_items), items=open_items[:50])
 
     # ---- 4) Geç sonuçlanan (>5dk) ----
-    # yeniden pair
     pmap2: Dict[str, deque] = defaultdict(deque)
     smap2: Dict[str, deque] = defaultdict(deque)
     for i in placed_ix:  pmap2[_key_for_row(cyc, i, c_ref, c_cid)].append(i)
@@ -238,7 +237,7 @@ async def brief(
     late_items: List[LateGapItem] = []
     late_total = 0.0
     late_count = 0
-    for key in list(set(pmap2) | set(smap2)):
+    for key in set(pmap2) | set(smap2):
         ps, ss = pmap2.get(key, deque()), smap2.get(key, deque())
         while ps and ss:
             p_i, s_i = ps.popleft(), ss.popleft()
@@ -276,7 +275,6 @@ async def brief(
     row5 = Row5_TopGames(items=top_items)
 
     currency = (str(cyc[c_curr].iloc[0]) if c_curr and not cyc[c_curr].empty else None)
-    member_val = str(df.iloc[s_idx][c_mb])
 
     return BriefResponse(
         filename=file.filename,
